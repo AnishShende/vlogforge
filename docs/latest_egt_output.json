@@ -1,0 +1,318 @@
+﻿{
+    "job_id":  "0106f1a4-2430-4df9-b16e-f11b738b892c",
+    "egt":  {
+                "segments":  [
+                                 {
+                                     "clip_id":  "1a45b8ebea74",
+                                     "source_file":  "end-part.mp4",
+                                     "source_file_hash":  "0ece3cfe924f25cb05f2cff60f50964260a0a978f2ac79acd89c88778075b4aa",
+                                     "start_sec":  0.0,
+                                     "end_sec":  8.0,
+                                     "duration_sec":  8.0,
+                                     "transcript":  "So that\u0027s it for my channel for today. Maybe we will be logging back tomorrow as well and like, share and subscribe.",
+                                     "language_id":  "en",
+                                     "visual_description":  "A young man with dark, messy hair looks away from the camera in a dimly lit room, creating an intimate, casual vlog atmosphere. The low-key, indoor lighting casts soft shadows, drawing focus to his expression as he appears to be showing or reflecting on his surroundings.",
+                                     "keyframe_path":  "d:/VlogForge/uploads\\0106f1a4-2430-4df9-b16e-f11b738b892c\\keyframes\\end-part_scene_0.jpg",
+                                     "segment_type":  "SPEECH",
+                                     "quality_score":  1.0,
+                                     "quality_flags":  [
+
+                                                       ],
+                                     "is_bad_take":  false,
+                                     "journey_collection":  null,
+                                     "structural_cue":  null,
+                                     "structural_cue_target":  null,
+                                     "perception_model":  "rule-based-v0",
+                                     "generated":  false,
+                                     "tags":  [
+                                                  "person_speaking",
+                                                  "indoor",
+                                                  "food",
+                                                  "low_light"
+                                              ]
+                                 },
+                                 {
+                                     "clip_id":  "055b833b1816",
+                                     "source_file":  "mid-part.mp4",
+                                     "source_file_hash":  "255ca181f4309f1653209360f154b9abbf00f7404c02eb754f080a7108912b6f",
+                                     "start_sec":  0.0,
+                                     "end_sec":  5.2,
+                                     "duration_sec":  5.2,
+                                     "transcript":  "I might just give you guys a room tour. This is a test demonstration, so.",
+                                     "language_id":  "en",
+                                     "visual_description":  "A young man is centered in the frame, speaking directly to the camera in a casually lit, dimly recorded indoor setting. His focused expression suggests he is likely narrating or introducing a segment of his room tour vlog.",
+                                     "keyframe_path":  "d:/VlogForge/uploads\\0106f1a4-2430-4df9-b16e-f11b738b892c\\keyframes\\mid-part_scene_0.jpg",
+                                     "segment_type":  "SPEECH",
+                                     "quality_score":  1.0,
+                                     "quality_flags":  [
+
+                                                       ],
+                                     "is_bad_take":  false,
+                                     "journey_collection":  null,
+                                     "structural_cue":  null,
+                                     "structural_cue_target":  null,
+                                     "perception_model":  "rule-based-v0",
+                                     "generated":  false,
+                                     "tags":  [
+                                                  "person_speaking",
+                                                  "indoor",
+                                                  "low_light"
+                                              ]
+                                 },
+                                 {
+                                     "clip_id":  "6c2530d88289",
+                                     "source_file":  "mid-part.mp4",
+                                     "source_file_hash":  "255ca181f4309f1653209360f154b9abbf00f7404c02eb754f080a7108912b6f",
+                                     "start_sec":  5.2,
+                                     "end_sec":  17.2,
+                                     "duration_sec":  12.0,
+                                     "transcript":  "Here is my multitainment, and this is something my friend had. This is my girlfriend gave me. These are the books, and at the same time, if you look at it, this is my set",
+                                     "language_id":  "en",
+                                     "visual_description":  "In this room tour vlog, a young man points toward a collection of small figurines and supplement bottles displayed on a wooden wall shelf. The scene is softly lit by natural light filtering through nearby curtains, highlighting the personal details of his room.",
+                                     "keyframe_path":  "d:/VlogForge/uploads\\0106f1a4-2430-4df9-b16e-f11b738b892c\\keyframes\\mid-part_scene_t5.jpg",
+                                     "segment_type":  "SPEECH",
+                                     "quality_score":  1.0,
+                                     "quality_flags":  [
+
+                                                       ],
+                                     "is_bad_take":  false,
+                                     "journey_collection":  null,
+                                     "structural_cue":  null,
+                                     "structural_cue_target":  null,
+                                     "perception_model":  "rule-based-v0",
+                                     "generated":  false,
+                                     "tags":  [
+                                                  "person_speaking",
+                                                  "indoor"
+                                              ]
+                                 },
+                                 {
+                                     "clip_id":  "9bb6cfdfcb2a",
+                                     "source_file":  "mid-part.mp4",
+                                     "source_file_hash":  "255ca181f4309f1653209360f154b9abbf00f7404c02eb754f080a7108912b6f",
+                                     "start_sec":  17.2,
+                                     "end_sec":  23.733333,
+                                     "duration_sec":  6.533333,
+                                     "transcript":  "These are the books, and at the same time, if you look at it, this is my set currently, not good looking, but yeah, that\u0027s it.",
+                                     "language_id":  "en",
+                                     "visual_description":  "A young man speaks directly to the camera in a casually lit indoor setting, gesturing with his hand as if introducing a space during his room tour vlog. The slightly blurred, motion-filled composition highlights his engagement with the audience while showcasing his personal environment.",
+                                     "keyframe_path":  "d:/VlogForge/uploads\\0106f1a4-2430-4df9-b16e-f11b738b892c\\keyframes\\mid-part_scene_t17.jpg",
+                                     "segment_type":  "SPEECH",
+                                     "quality_score":  1.0,
+                                     "quality_flags":  [
+
+                                                       ],
+                                     "is_bad_take":  false,
+                                     "journey_collection":  null,
+                                     "structural_cue":  null,
+                                     "structural_cue_target":  null,
+                                     "perception_model":  "rule-based-v0",
+                                     "generated":  false,
+                                     "tags":  [
+                                                  "person_speaking",
+                                                  "indoor"
+                                              ]
+                                 },
+                                 {
+                                     "clip_id":  "6fea99d95826",
+                                     "source_file":  "mid-part.mp4",
+                                     "source_file_hash":  "255ca181f4309f1653209360f154b9abbf00f7404c02eb754f080a7108912b6f",
+                                     "start_sec":  23.733333,
+                                     "end_sec":  31.6,
+                                     "duration_sec":  7.866667,
+                                     "transcript":  "currently, not good looking, but yeah, that\u0027s it. And this is my physio shape.",
+                                     "language_id":  "en",
+                                     "visual_description":  "A vlogger partially frames their face in the foreground while panning the camera to show a bedroom setting with a cluttered desk against a plain white wall. The shot is captured in soft, natural indoor lighting, emphasizing an informal, documentary-style \"room tour\" aesthetic.",
+                                     "keyframe_path":  "d:/VlogForge/uploads\\0106f1a4-2430-4df9-b16e-f11b738b892c\\keyframes\\mid-part_scene_24.jpg",
+                                     "segment_type":  "SPEECH",
+                                     "quality_score":  1.0,
+                                     "quality_flags":  [
+
+                                                       ],
+                                     "is_bad_take":  false,
+                                     "journey_collection":  null,
+                                     "structural_cue":  null,
+                                     "structural_cue_target":  null,
+                                     "perception_model":  "rule-based-v0",
+                                     "generated":  false,
+                                     "tags":  [
+                                                  "person_speaking",
+                                                  "indoor"
+                                              ]
+                                 },
+                                 {
+                                     "clip_id":  "e0a3f3874c14",
+                                     "source_file":  "start-part.mp4",
+                                     "source_file_hash":  "926909eb5f2460f8c7e399798f87a38c0251e4e15b0b78e91722d3ee9e3bc796",
+                                     "start_sec":  0.0,
+                                     "end_sec":  4.016009,
+                                     "duration_sec":  4.016009,
+                                     "transcript":  "Hi guys, welcome to my channel. So this is a test video.",
+                                     "language_id":  "en",
+                                     "visual_description":  "In this dimly lit vlog keyframe, a young man faces the camera to speak, with the soft lighting highlighting his face against the darker backdrop of his room. The simple, low-key setting creates an intimate and casual atmosphere for the room tour.",
+                                     "keyframe_path":  "d:/VlogForge/uploads\\0106f1a4-2430-4df9-b16e-f11b738b892c\\keyframes\\start-part_scene_0.jpg",
+                                     "segment_type":  "INTRO",
+                                     "quality_score":  1.0,
+                                     "quality_flags":  [
+
+                                                       ],
+                                     "is_bad_take":  false,
+                                     "journey_collection":  null,
+                                     "structural_cue":  null,
+                                     "structural_cue_target":  null,
+                                     "perception_model":  "rule-based-v0",
+                                     "generated":  false,
+                                     "tags":  [
+                                                  "person_speaking",
+                                                  "indoor",
+                                                  "low_light"
+                                              ]
+                                 },
+                                 {
+                                     "clip_id":  "af9a12753f71",
+                                     "source_file":  "travel.mp4",
+                                     "source_file_hash":  "86145fa2d9b865df588ab5aedaa670cf5228fe292945845dfdd4aa0c0db4d092",
+                                     "start_sec":  0.0,
+                                     "end_sec":  8.0,
+                                     "duration_sec":  8.0,
+                                     "transcript":  "um so I might as well just allow you to see some of the travel videos, probably one of those tracks that I did.",
+                                     "language_id":  "en",
+                                     "visual_description":  "A young man in a gray t-shirt is captured in a close-up, neutral-lit indoor setting, looking directly at the camera with a thoughtful expression while running his hand through his hair. The casual, intimate composition suggests a relaxed moment during a room tour vlog.",
+                                     "keyframe_path":  "d:/VlogForge/uploads\\0106f1a4-2430-4df9-b16e-f11b738b892c\\keyframes\\travel_scene_0.jpg",
+                                     "segment_type":  "SPEECH",
+                                     "quality_score":  1.0,
+                                     "quality_flags":  [
+
+                                                       ],
+                                     "is_bad_take":  false,
+                                     "journey_collection":  null,
+                                     "structural_cue":  null,
+                                     "structural_cue_target":  null,
+                                     "perception_model":  "rule-based-v0",
+                                     "generated":  false,
+                                     "tags":  [
+                                                  "person_speaking",
+                                                  "indoor",
+                                                  "travel_activity"
+                                              ]
+                                 },
+                                 {
+                                     "clip_id":  "9c5a7710b501",
+                                     "source_file":  "travel.mp4",
+                                     "source_file_hash":  "86145fa2d9b865df588ab5aedaa670cf5228fe292945845dfdd4aa0c0db4d092",
+                                     "start_sec":  8.0,
+                                     "end_sec":  15.719002,
+                                     "duration_sec":  7.719002,
+                                     "transcript":  "allow you to see some of the travel videos, probably one of those tracks that I did. and once that is done, maybe then I will give you the house tour.",
+                                     "language_id":  "en",
+                                     "visual_description":  "A young man looks down while speaking during a vlog, set against the neutral, softly lit backdrop of a room with storage cabinets. The direct, close-up framing creates an intimate, conversational tone typical of a casual room tour.",
+                                     "keyframe_path":  "d:/VlogForge/uploads\\0106f1a4-2430-4df9-b16e-f11b738b892c\\keyframes\\travel_scene_8.jpg",
+                                     "segment_type":  "SPEECH",
+                                     "quality_score":  1.0,
+                                     "quality_flags":  [
+
+                                                       ],
+                                     "is_bad_take":  false,
+                                     "journey_collection":  null,
+                                     "structural_cue":  null,
+                                     "structural_cue_target":  null,
+                                     "perception_model":  "rule-based-v0",
+                                     "generated":  false,
+                                     "tags":  [
+                                                  "person_speaking",
+                                                  "indoor",
+                                                  "travel_activity"
+                                              ]
+                                 },
+                                 {
+                                     "clip_id":  "779ef8cb8f15",
+                                     "source_file":  "travel-plane.mp4",
+                                     "source_file_hash":  "dd49c494457b1dcc3b121f977d1523722536d4c4031bff2735340389bbfc63b7",
+                                     "start_sec":  0.0,
+                                     "end_sec":  8.0,
+                                     "duration_sec":  8.0,
+                                     "transcript":  "Bantu tentukan poin tanda isyarat pasang ke tempat yang baru sahaja dipadamkan. Untuk keselamatan anda, sila pasangkan tempat duduk semasa berada di tempat duduk dan sila kembali ke tempat duduk anda semasa tanda isyarat pasang ke tempat duduk dinyalakan semasa berada dalam tandas. Anda diminta berhati-hati ketika membuka",
+                                     "language_id":  "en",
+                                     "visual_description":  "This aerial view from an airplane window captures a bright, sunny landscape featuring a lush coastline and small islands. The shot is framed by the dark, metallic propeller of the aircraft, which serves as a striking point of interest against the sprawling blue water and sky.",
+                                     "keyframe_path":  "d:/VlogForge/uploads\\0106f1a4-2430-4df9-b16e-f11b738b892c\\keyframes\\travel-plane_scene_0.jpg",
+                                     "segment_type":  "SPEECH",
+                                     "quality_score":  1.0,
+                                     "quality_flags":  [
+
+                                                       ],
+                                     "is_bad_take":  false,
+                                     "journey_collection":  null,
+                                     "structural_cue":  null,
+                                     "structural_cue_target":  null,
+                                     "perception_model":  "rule-based-v0",
+                                     "generated":  false,
+                                     "tags":  [
+                                                  "outdoor",
+                                                  "scenic",
+                                                  "low_light"
+                                              ]
+                                 },
+                                 {
+                                     "clip_id":  "ade22bc31a97",
+                                     "source_file":  "travel-plane.mp4",
+                                     "source_file_hash":  "dd49c494457b1dcc3b121f977d1523722536d4c4031bff2735340389bbfc63b7",
+                                     "start_sec":  8.0,
+                                     "end_sec":  16.0,
+                                     "duration_sec":  8.0,
+                                     "transcript":  "Bantu tentukan poin tanda isyarat pasang ke tempat yang baru sahaja dipadamkan. Untuk keselamatan anda, sila pasangkan tempat duduk semasa berada di tempat duduk dan sila kembali ke tempat duduk anda semasa tanda isyarat pasang ke tempat duduk dinyalakan semasa berada dalam tandas. Anda diminta berhati-hati ketika membuka",
+                                     "language_id":  "en",
+                                     "visual_description":  "This aerial shot captures a scenic view of lush, mountainous islands surrounded by turquoise waters, framed by an airplane window and part of its propeller. Bright, natural daylight highlights the tropical landscape, setting a travel-focused tone for the upcoming room tour.",
+                                     "keyframe_path":  "d:/VlogForge/uploads\\0106f1a4-2430-4df9-b16e-f11b738b892c\\keyframes\\travel-plane_scene_8.jpg",
+                                     "segment_type":  "SPEECH",
+                                     "quality_score":  1.0,
+                                     "quality_flags":  [
+
+                                                       ],
+                                     "is_bad_take":  false,
+                                     "journey_collection":  null,
+                                     "structural_cue":  null,
+                                     "structural_cue_target":  null,
+                                     "perception_model":  "rule-based-v0",
+                                     "generated":  false,
+                                     "tags":  [
+                                                  "outdoor",
+                                                  "indoor",
+                                                  "travel_activity",
+                                                  "scenic"
+                                              ]
+                                 },
+                                 {
+                                     "clip_id":  "254af05cb456",
+                                     "source_file":  "travel-plane.mp4",
+                                     "source_file_hash":  "dd49c494457b1dcc3b121f977d1523722536d4c4031bff2735340389bbfc63b7",
+                                     "start_sec":  16.0,
+                                     "end_sec":  18.18,
+                                     "duration_sec":  2.18,
+                                     "transcript":  "Bantu tentukan poin tanda isyarat pasang ke tempat yang baru sahaja dipadamkan. Untuk keselamatan anda, sila pasangkan tempat duduk semasa berada di tempat duduk dan sila kembali ke tempat duduk anda semasa tanda isyarat pasang ke tempat duduk dinyalakan semasa berada dalam tandas. Anda diminta berhati-hati ketika membuka",
+                                     "language_id":  "en",
+                                     "visual_description":  "A shot from a plane window captures the rotating propeller of a red aircraft engine set against a bright, sunlit sky. Beneath the plane, a stunning tropical landscape of scattered islands and turquoise waters creates an engaging, high-altitude travel perspective.",
+                                     "keyframe_path":  "d:/VlogForge/uploads\\0106f1a4-2430-4df9-b16e-f11b738b892c\\keyframes\\travel-plane_scene_16.jpg",
+                                     "segment_type":  "SPEECH",
+                                     "quality_score":  0.9,
+                                     "quality_flags":  [
+                                                           "short"
+                                                       ],
+                                     "is_bad_take":  false,
+                                     "journey_collection":  null,
+                                     "structural_cue":  null,
+                                     "structural_cue_target":  null,
+                                     "perception_model":  "rule-based-v0",
+                                     "generated":  false,
+                                     "tags":  [
+                                                  "outdoor",
+                                                  "travel_activity",
+                                                  "scenic"
+                                              ]
+                                 }
+                             ],
+                "total_duration_sec":  78.05900199999999,
+                "source_file_count":  5,
+                "context_summary":  "### **Context Document: Daily Vlog \u0026 Room Tour**\n\nThis document outlines the creative direction and structural flow for the vlog based on the provided inputs.\n\n---\n\n#### **1. Topic**\nA casual, day-in-the-life style vlog that bridges travel experiences with a personal living space showcase. The primary focus is an intimate \"room tour\" where the creator shares personal items, workspace details, and hobbies, interspersed with B-roll of recent travels.\n\n#### **2. Mood**\n*   **Intimate \u0026 Conversational:** The vlog maintains a \"low-fi,\" documentary aesthetic. The host speaks directly to the camera in a relaxed, unfiltered manner.\n*   **Warm \u0026 Atmospheric:** Lighting transitions from the cozy, soft shadows of a dimly lit room to the bright, high-energy natural light of aerial travel shots. \n*   **Authentic:** The \"not good looking, but yeah\" attitude toward his room setup emphasizes honesty over polished, high-production perfection.\n\n#### **3. Notable Moments**\n*   **The \"Travel Intro\":** The video begins or transitions with high-altitude aerial views of islands from an airplane window, establishing a sense of adventure.\n*   **The Room Reveal:** The core segment featuring the \"multitainment\" shelf, personal gifts from a partner, and the desk setup.\n*   **The \"Physio Shape\" Segment:** A specific point of interest where the creator pivots from general decor to specific personal health or storage items.\n*   **The Sign-off:** A standard, casual call-to-action for subscribers, leaving the door open for future daily uploads.\n\n#### **4. Main Subjects**\n*   **The Host:** A young man with a casual, reflective demeanor who prioritizes connection with the viewer over scripted content.\n*   **The Personal Space:** The room itself acts as a characterâspecifically the \"multitainment\" display, a collection of books, and the desk setup (described as \"cluttered\" yet lived-in).\n*   **Travel Context:** The airplane propeller and tropical island landscapes serve as a narrative bridge, providing visual relief from the indoor room tour.\n\n#### **5. Pacing Strategy**\n*   **Pacing:** The vlog should utilize a \"slow-burn\" approach during the room tour to allow for intimacy and detailed storytelling, punctuated by the faster, more rhythmic transitions of the airplane travel footage.\n*   **Transitions:** Use the transition from the sunny, high-altitude travel shots to the dimly lit interior as a rhythmic \"reset\" for the viewer, signaling a shift from outward exploration to inward reflection.",
+                "perception_model_version":  "rule-based-v0"
+            }
+}

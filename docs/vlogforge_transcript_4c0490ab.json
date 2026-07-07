@@ -1,0 +1,102 @@
+{
+  "job_id": "4c0490ab-47b9-4d56-a572-733372cacd84",
+  "transcript": [
+    {
+      "video_file": "end-part.mp4",
+      "video_path": "d:/VlogForge/uploads\\4c0490ab-47b9-4d56-a572-733372cacd84\\raw\\end-part.mp4",
+      "start": 0,
+      "end": 8,
+      "keyframe_path": "d:/VlogForge/uploads\\4c0490ab-47b9-4d56-a572-733372cacd84\\keyframes\\end-part_scene_0.jpg",
+      "scene_idx": 0,
+      "text": "So that's it for my channel for today, maybe we'll be locking back tomorrow as well and like share and subscribe.",
+      "visual_description": "Visual: Vlogger in frame, speaking directly to the camera with soft indoor lighting.",
+      "label": "OUTRO",
+      "score": 0.9
+    },
+    {
+      "video_file": "mid-part.mp4",
+      "video_path": "d:/VlogForge/uploads\\4c0490ab-47b9-4d56-a572-733372cacd84\\raw\\mid-part.mp4",
+      "start": 0,
+      "end": 5.193333,
+      "keyframe_path": "d:/VlogForge/uploads\\4c0490ab-47b9-4d56-a572-733372cacd84\\keyframes\\mid-part_scene_0.jpg",
+      "scene_idx": 0,
+      "text": "So, I might just give you guys a room tour, this is at the Stridermonstration, so here is my multivittance, this is something my friend had, this is my girlfriend gave me these are the books and at the same time, if you look at it, this is my set to currently not, good looking but yeah, that's it, and this is my",
+      "visual_description": "Visual: Vlogger in frame, speaking directly to the camera with soft indoor lighting.",
+      "label": "HIGHLIGHT",
+      "score": 0.75
+    },
+    {
+      "video_file": "mid-part.mp4",
+      "video_path": "d:/VlogForge/uploads\\4c0490ab-47b9-4d56-a572-733372cacd84\\raw\\mid-part.mp4",
+      "start": 5.193333,
+      "end": 23.718333,
+      "keyframe_path": "d:/VlogForge/uploads\\4c0490ab-47b9-4d56-a572-733372cacd84\\keyframes\\mid-part_scene_1.jpg",
+      "scene_idx": 1,
+      "text": "So, I might just give you guys a room tour, this is at the Stridermonstration, so here is my multivittance, this is something my friend had, this is my girlfriend gave me these are the books and at the same time, if you look at it, this is my set to currently not, good looking but yeah, that's it, and this is my",
+      "visual_description": "Visual: Vlogger in frame, speaking directly to the camera with soft indoor lighting.",
+      "label": "HIGHLIGHT",
+      "score": 0.75
+    },
+    {
+      "video_file": "mid-part.mp4",
+      "video_path": "d:/VlogForge/uploads\\4c0490ab-47b9-4d56-a572-733372cacd84\\raw\\mid-part.mp4",
+      "start": 23.718333,
+      "end": 31.60333333333333,
+      "keyframe_path": "d:/VlogForge/uploads\\4c0490ab-47b9-4d56-a572-733372cacd84\\keyframes\\mid-part_scene_2.jpg",
+      "scene_idx": 2,
+      "text": "So, I might just give you guys a room tour, this is at the Stridermonstration, so here is my multivittance, this is something my friend had, this is my girlfriend gave me these are the books and at the same time, if you look at it, this is my set to currently not, good looking but yeah, that's it, and this is my physician",
+      "visual_description": "Visual: Vlogger in frame, speaking directly to the camera with soft indoor lighting.",
+      "label": "HIGHLIGHT",
+      "score": 0.75
+    },
+    {
+      "video_file": "start-part.mp4",
+      "video_path": "d:/VlogForge/uploads\\4c0490ab-47b9-4d56-a572-733372cacd84\\raw\\start-part.mp4",
+      "start": 0,
+      "end": 4,
+      "keyframe_path": "d:/VlogForge/uploads\\4c0490ab-47b9-4d56-a572-733372cacd84\\keyframes\\start-part_scene_0.jpg",
+      "scene_idx": 0,
+      "text": "Hi guys welcome to my channel so this is a test video",
+      "visual_description": "Visual: Vlogger in frame, speaking directly to the camera with soft indoor lighting.",
+      "label": "INTRO",
+      "score": 0.9
+    },
+    {
+      "video_file": "WhatsApp Video 2026-06-23 at 3.28.37 PM.mp4",
+      "video_path": "d:/VlogForge/uploads\\4c0490ab-47b9-4d56-a572-733372cacd84\\raw\\WhatsApp Video 2026-06-23 at 3.28.37 PM.mp4",
+      "start": 0,
+      "end": 8,
+      "keyframe_path": "d:/VlogForge/uploads\\4c0490ab-47b9-4d56-a572-733372cacd84\\keyframes\\WhatsApp Video 2026-06-23 at 3.28.37 PM_scene_0.jpg",
+      "scene_idx": 0,
+      "text": "Hi guys, welcome back to the channel. Let's start the work we are going to do today.",
+      "visual_description": "Visual: Vlogger in frame, speaking directly to the camera with soft indoor lighting.",
+      "label": "INTRO",
+      "score": 0.9
+    },
+    {
+      "video_file": "WhatsApp Video 2026-06-23 at 3.28.37 PM.mp4",
+      "video_path": "d:/VlogForge/uploads\\4c0490ab-47b9-4d56-a572-733372cacd84\\raw\\WhatsApp Video 2026-06-23 at 3.28.37 PM.mp4",
+      "start": 8,
+      "end": 16,
+      "keyframe_path": "d:/VlogForge/uploads\\4c0490ab-47b9-4d56-a572-733372cacd84\\keyframes\\WhatsApp Video 2026-06-23 at 3.28.37 PM_scene_1.jpg",
+      "scene_idx": 1,
+      "text": "So today we are going to eat our mangoes and stay hydrated.",
+      "visual_description": "Visual: Vlogger in frame, speaking directly to the camera with soft indoor lighting.",
+      "label": "INTRO",
+      "score": 0.9
+    },
+    {
+      "video_file": "WhatsApp Video 2026-06-23 at 3.28.37 PM.mp4",
+      "video_path": "d:/VlogForge/uploads\\4c0490ab-47b9-4d56-a572-733372cacd84\\raw\\WhatsApp Video 2026-06-23 at 3.28.37 PM.mp4",
+      "start": 16,
+      "end": 22.483333,
+      "keyframe_path": "d:/VlogForge/uploads\\4c0490ab-47b9-4d56-a572-733372cacd84\\keyframes\\WhatsApp Video 2026-06-23 at 3.28.37 PM_scene_2.jpg",
+      "scene_idx": 2,
+      "text": "That's it for today's.",
+      "visual_description": "Visual: Vlogger in frame, speaking directly to the camera with soft indoor lighting.",
+      "label": "HIGHLIGHT",
+      "score": 0.75
+    }
+  ],
+  "context_document": "Vlog Context Summary. User Context: This is my video where I am giving a house tour , also add the part where my friend also shows what he is doing . Pacing: Standard vlog. Focus: Dynamic scenes."
+}

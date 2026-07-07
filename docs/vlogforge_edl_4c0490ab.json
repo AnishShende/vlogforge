@@ -1,0 +1,53 @@
+{
+  "job_id": "4c0490ab-47b9-4d56-a572-733372cacd84",
+  "edl": [
+    {
+      "video_file": "start-part.mp4",
+      "start_sec": 0,
+      "end_sec": 4,
+      "type": "INTRO"
+    },
+    {
+      "video_file": "WhatsApp Video 2026-06-23 at 3.28.37 PM.mp4",
+      "start_sec": 0,
+      "end_sec": 8,
+      "type": "HIGHLIGHT"
+    },
+    {
+      "video_file": "WhatsApp Video 2026-06-23 at 3.28.37 PM.mp4",
+      "start_sec": 8,
+      "end_sec": 16,
+      "type": "HIGHLIGHT"
+    },
+    {
+      "video_file": "mid-part.mp4",
+      "start_sec": 0,
+      "end_sec": 5.193333,
+      "type": "HIGHLIGHT"
+    },
+    {
+      "video_file": "mid-part.mp4",
+      "start_sec": 5.193333,
+      "end_sec": 23.718333,
+      "type": "HIGHLIGHT"
+    },
+    {
+      "video_file": "mid-part.mp4",
+      "start_sec": 23.718333,
+      "end_sec": 31.60333333333333,
+      "type": "HIGHLIGHT"
+    },
+    {
+      "video_file": "WhatsApp Video 2026-06-23 at 3.28.37 PM.mp4",
+      "start_sec": 16,
+      "end_sec": 22.483333,
+      "type": "HIGHLIGHT"
+    },
+    {
+      "video_file": "end-part.mp4",
+      "start_sec": 0,
+      "end_sec": 8,
+      "type": "OUTRO"
+    }
+  ]
+}
