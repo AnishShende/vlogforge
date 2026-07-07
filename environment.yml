@@ -1,0 +1,21 @@
+name: vlogforge
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - ffmpeg
+  - pip
+  - pip:
+      - fastapi
+      - uvicorn[standard]
+      - websockets
+      - python-multipart
+      - pydantic-settings
+      - python-dotenv
+      - faster-whisper
+      - google-genai
+      - pillow
+      - scenedetect[opencv]
+      - opencv-python-headless
+      - pytest
