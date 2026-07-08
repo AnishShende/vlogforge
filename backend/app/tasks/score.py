@@ -16,6 +16,7 @@ from typing import List
 
 from app.models import EGTSegment
 from app.config import settings
+from app.utils.llm import classify_egt_segments
 
 logger = logging.getLogger("VlogForge.Score")
 
@@ -100,12 +101,12 @@ def classify_segment_type(
     if word_count == 0 and duration < 2.0:
         return "SILENCE"
 
-    # INTRO: early position + keyword match
-    if is_early and _contains_keyword(text, INTRO_KEYWORDS):
+    # INTRO: keyword match
+    if _contains_keyword(text, INTRO_KEYWORDS):
         return "INTRO"
 
-    # OUTRO: late position + keyword match
-    if is_late and _contains_keyword(text, OUTRO_KEYWORDS):
+    # OUTRO: keyword match
+    if _contains_keyword(text, OUTRO_KEYWORDS):
         return "OUTRO"
 
     # B_ROLL: visual content but minimal speech
@@ -199,7 +200,8 @@ def score_segments(
     segments: List[EGTSegment],
     total_duration: float,
     context_doc: str = "",
-    quality_threshold: float = 0.35
+    quality_threshold: float = 0.35,
+    progress_callback=None  # Optional callable(done: int, total: int)
 ) -> List[EGTSegment]:
     """Score and classify all EGT segments.
 
@@ -219,21 +221,23 @@ def score_segments(
     bad_take_count = 0
 
     # Step 1: Semantic Classification via LLM
-    from app.utils.llm import classify_egt_segments
     # We pass the segments as dicts to the LLM, then merge back the results
     segment_dicts = [seg.model_dump() for seg in segments]
-    classified_dicts = classify_egt_segments(segment_dicts, context_doc)
+    classified_dicts = classify_egt_segments(segment_dicts, context_doc, progress_callback=progress_callback)
     
     # Merge results
     for idx, (seg, classified) in enumerate(zip(segments, classified_dicts)):
         # Apply semantic classification
         seg.segment_type = classified.get("segment_type", "SPEECH")
         seg.structural_cue = classified.get("structural_cue")
-        seg.perception_model = classified.get("perception_model", "rule-based-v0")
         
-        # If semantic classification fails, use the old rule-based fallback
-        if seg.perception_model == "rule-based-v0":
+        perception_model = classified.get("perception_model", "")
+        # If semantic classification wasn't run (uninitialized) or explicitly failed, fallback
+        if not perception_model or perception_model == "rule-based-v0":
+            seg.perception_model = "rule-based-v0"
             seg.segment_type = classify_segment_type(seg, total_duration, idx, len(segments))
+        else:
+            seg.perception_model = perception_model
 
         # Step 2: Compute quality score (still rule-based for audio SNR)
         score, flags = compute_quality_score(seg)

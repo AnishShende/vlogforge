@@ -16,6 +16,16 @@ export default defineConfig({
         target: 'ws://127.0.0.1:8000',
         ws: true,
         changeOrigin: true,
+        // Don't crash Vite when the backend drops the WS connection during long Gemini retries
+        configure: (proxy) => {
+          proxy.on('error', (err) => {
+            // Suppress EPIPE/connection reset errors - frontend will auto-reconnect
+            if (err.code === 'EPIPE' || err.code === 'ECONNRESET' || err.code === 'ECONNREFUSED') {
+              return;
+            }
+            console.error('[vite-proxy] WS error:', err.message);
+          });
+        },
       }
     }
   }

@@ -1,12 +1,14 @@
+import re
 import logging
 from typing import List, Dict, Optional
 from app.models import EDLItem
+from app.utils.llm import select_reel_segments_llm, sequence_edl_segments
 
 logger = logging.getLogger("VlogForge.EDL")
 
 def is_background_noise(text: str, visual: str, user_prompt: str) -> bool:
     """Detects if a segment's audio/transcript represents unwanted background noise, static, or announcements."""
-    import re
+    # Check for non-speech noise using a regex on the lowercased text.
     text_lower = text.lower().strip()
     visual_lower = visual.lower().strip()
     user_prompt_lower = user_prompt.lower()
@@ -178,7 +180,6 @@ def generate_edl(
         
     if is_reel:
         logger.info("Reel Option detected. Running reel selection strategy.")
-        from app.utils.llm import select_reel_segments_llm
         llm_selected = select_reel_segments_llm(scenes_with_indices, target_duration, context_doc, user_prompt)
         
         if llm_selected is not None:
@@ -240,7 +241,6 @@ def generate_edl(
             selected_scenes.sort(key=lambda x: x["_orig_idx"])
             
             # Sequence fallback selection using LLM
-            from app.utils.llm import sequence_edl_segments
             sequenced_edl = sequence_edl_segments(selected_scenes, context_doc)
             
             # Enforce that INTRO segments are always placed at the front of the EDL, and OUTROs at the end
@@ -368,7 +368,6 @@ def generate_edl(
             raw_edl.append(selected_outro)
             
         # Attempt LLM sequencing based on narrative cues and transcripts
-        from app.utils.llm import sequence_edl_segments
         sequenced_edl = sequence_edl_segments(raw_edl, context_doc)
         
     # Format to required output EDL list with boundary cut snapping

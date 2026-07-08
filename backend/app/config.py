@@ -22,6 +22,17 @@ class Settings(BaseSettings):
         extra="ignore"
     )
 
+    def __init__(self, **values):
+        super().__init__(**values)
+        import platform
+        # On non-Windows platforms, translate Windows D: drive defaults to local workspace paths
+        if self.upload_dir.lower().startswith("d:"):
+            if platform.system() != "Windows" or not (os.path.exists("d:\\") or os.path.exists("D:\\")):
+                workspace_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                self.upload_dir = os.path.join(workspace_root, "uploads")
+                self.output_dir = os.path.join(workspace_root, "outputs")
+                self.log_dir = os.path.join(workspace_root, "logs")
+
 settings = Settings()
 
 # Ensure directories exist

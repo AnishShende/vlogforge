@@ -18,8 +18,11 @@
 """
 
 import os
+import shutil
 import asyncio
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Dict, List, Set, Optional
 from fastapi import WebSocket
@@ -108,8 +111,7 @@ async def broadcast_progress(job_id: str, stage: str, progress: int, message: st
 
 def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, target_duration: float = 10.0, vlog_genre: str = "default", quality_threshold: float = 0.35):
     """Synchronous pipeline run (to be run in a separate thread)."""
-    import threading
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+
 
     # Create event loop for this thread to call async broadcast function
     loop = asyncio.new_event_loop()
@@ -128,9 +130,37 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
     job_dir = os.path.join(settings.upload_dir, job_id)
     os.makedirs(job_dir, exist_ok=True)
 
+    # Set up per-job file logging
+    job_log_file = os.path.join(settings.log_dir, f"job_{job_id}.log")
+    job_handler = logging.FileHandler(job_log_file, encoding='utf-8')
+    job_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+    logging.getLogger().addHandler(job_handler)
+    logger.info(f"--- STARTING PIPELINE JOB: {job_id} ---")
+
+    # Heartbeat thread: sends a ping every 10s to keep the Vite proxy's WebSocket alive
+    # during long Gemini rate-limit waits (which can block for 50-60s with no WS activity)
+    heartbeat_stop = threading.Event()
+
+    def heartbeat_worker():
+        while not heartbeat_stop.is_set():
+            heartbeat_stop.wait(timeout=10.0)
+            if heartbeat_stop.is_set():
+                break
+            try:
+                with broadcast_lock:
+                    loop.run_until_complete(
+                        broadcast_progress(job_id, "heartbeat", -1, "ping")
+                    )
+            except Exception:
+                pass  # Ignore errors — websocket may have disconnected cleanly
+
+    heartbeat_thread = threading.Thread(target=heartbeat_worker, daemon=True)
+    heartbeat_thread.start()
+
     def check_cancelled():
         if job_id in jobs_db and jobs_db[job_id].status == "cancelled":
             raise RuntimeError("Job cancelled by user.")
+
 
     try:
         # ==================================================================
@@ -240,13 +270,20 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
 
         # ---- Stage 4: Quality Scoring ----
         check_cancelled()
-        safe_broadcast("scoring", 55, "Scoring segment quality...")
+        safe_broadcast("classifying", 55, "Classifying segments...")
 
-        all_segments = score_segments(all_segments, total_raw_duration, context_summary, quality_threshold)
+        def scoring_progress(done: int, total: int):
+            pct = 55 + int(9 * done / total)  # 55% -> 64%
+            safe_broadcast("classifying", pct, f"Classifying segment {done}/{total}...")
+
+        all_segments = score_segments(
+            all_segments, total_raw_duration, context_summary, quality_threshold,
+            progress_callback=scoring_progress
+        )
 
         # ---- Stage 5: EGT Assembly & Validation ----
         check_cancelled()
-        safe_broadcast("egt_building", 65, "Building Editorial Ground Truth document...")
+        safe_broadcast("classifying", 64, "Building Editorial Ground Truth document...")
 
         egt_doc = build_egt_document(
             segments=all_segments,
@@ -297,7 +334,6 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
         # Clean up CFR temp files after successful assembly to save disk space
         cfr_dir = os.path.join(job_dir, "cfr")
         if os.path.isdir(cfr_dir):
-            import shutil
             try:
                 shutil.rmtree(cfr_dir)
                 logger.info(f"CFR temp directory cleaned up: {cfr_dir}")
@@ -329,6 +365,10 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
                 job_id, "failed", 0, f"Error: {str(e)}"
             ))
     finally:
+        heartbeat_stop.set()
+        logger.info(f"--- ENDING PIPELINE JOB: {job_id} ---")
+        logging.getLogger().removeHandler(job_handler)
+        job_handler.close()
         loop.close()
 
 async def start_pipeline(job_id: str, video_paths: List[str], context_text: str, target_duration: float = 10.0, vlog_genre: str = "default", quality_threshold: float = 0.35):
@@ -339,7 +379,6 @@ async def start_pipeline(job_id: str, video_paths: List[str], context_text: str,
 
 def run_re_reasoning_sync(job_id: str, quality_threshold: float):
     """Re-run just the Reasoning (Pass 2) and Assembly (Pass 3) after threshold change."""
-    import threading
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     broadcast_lock = threading.Lock()
@@ -356,7 +395,7 @@ def run_re_reasoning_sync(job_id: str, quality_threshold: float):
 
         job_dir = os.path.join(settings.upload_dir, job_id)
         
-        safe_broadcast("scoring", 70, "Applying new quality threshold...")
+        safe_broadcast("classifying", 70, "Applying new quality threshold...")
         
         # 1. Update is_bad_take on EGT Document directly
         egt_doc_dict = job_data["egt"]

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Film, Sparkles, Sliders, Clock, Loader2, Home, LayoutDashboard, Settings } from 'lucide-react';
+import { Film, Sparkles, Sliders, Clock, Loader2, Home, LayoutDashboard, Settings, Sun, Moon } from 'lucide-react';
 import UploadPanel from './components/UploadPanel';
 import ProcessingMonitor from './components/ProcessingMonitor';
 import VideoPreview from './components/VideoPreview';
@@ -189,28 +189,11 @@ export default function App() {
 
   return (
     <div className="dashboard-layout">
-      {/* Static Sidebar */}
-      <aside className="dashboard-sidebar">
-        <div style={{ marginBottom: '2rem', color: 'var(--primary)' }}>
-          <Film size={28} />
-        </div>
-        <div className="dashboard-sidebar-item active" title="Home">
-          <Home size={22} />
-        </div>
-        <div className="dashboard-sidebar-item" title="Projects">
-          <LayoutDashboard size={22} />
-        </div>
-        <div style={{ marginTop: 'auto' }}>
-          <div className="dashboard-sidebar-item" title="Settings">
-            <Settings size={22} />
-          </div>
-        </div>
-      </aside>
-
       <div className="dashboard-main">
         {/* Top Header */}
         <header className="dashboard-header">
           <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+             <Film size={24} style={{ color: 'var(--primary)', filter: 'drop-shadow(0 0 4px var(--primary-glow))' }} />
              <h1 style={{ margin: 0, fontSize: '1.25rem', fontFamily: 'Outfit, sans-serif' }}>VlogForge Studio</h1>
              <div style={{ width: '1px', height: '24px', background: 'var(--card-border)' }} />
              
@@ -228,6 +211,29 @@ export default function App() {
               ))}
             </div>
           </div>
+          
+          {/* Theme Switcher Button */}
+          <button 
+            onClick={toggleTheme}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              cursor: 'pointer',
+              color: 'var(--text-muted)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: '40px',
+              height: '40px',
+              borderRadius: 'var(--radius-md)',
+              transition: 'var(--transition)'
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(139, 92, 246, 0.1)'}
+            onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+            title="Toggle Theme"
+          >
+            {theme === 'dark' ? <Sun size={20} /> : <Moon size={20} />}
+          </button>
         </header>
 
         <main className="dashboard-content">

@@ -1,5 +1,5 @@
 import pytest
-from app.tasks.edl import generate_edl
+from app.tasks.reasoning.edl_v1 import generate_edl
 
 def test_generate_edl_rules():
     # 1. Total raw duration = 300s. Target duration should be 30% of 300 = 90s.
