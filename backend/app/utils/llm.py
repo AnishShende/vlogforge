@@ -2,6 +2,9 @@ import os
 import json
 import logging
 import time
+import base64
+import re
+import pydantic
 from functools import wraps
 from typing import List, Dict, Optional
 from PIL import Image
@@ -41,14 +44,13 @@ def with_gemini_retry(max_retries=5, base_delay=5.0):
                 except Exception as e:
                     err_str = str(e)
                     is_rate_limit = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
-                    is_quota_exceeded = "quota" in err_str.lower()
+                    is_daily_quota = "quota" in err_str.lower() and ("perday" in err_str.lower() or "free_tier_requests" in err_str.lower())
                     
-                    if is_quota_exceeded:
-                        logger.error("Gemini API daily/sustained quota limit exceeded. Failing immediately to trigger rule-based fallback.")
+                    if is_daily_quota:
+                        logger.error("Gemini API daily quota limit exceeded. Failing immediately to trigger model fallback.")
                         raise e
                         
                     if is_rate_limit and attempt < max_retries:
-                        import re
                         delay_match = re.search(r'retryDelay.*?(\d+)', err_str)
                         retry_delay = float(delay_match.group(1)) if delay_match else (base_delay * (2 ** attempt))
                         logger.warning(
@@ -100,11 +102,11 @@ def safe_generate_content(*args, **kwargs):
             return _gemini_client.models.generate_content(*current_args, **current_kwargs)
         except Exception as e:
             err_str = str(e)
-            is_quota_exceeded = "quota" in err_str.lower()
+            is_daily_quota = "quota" in err_str.lower() and ("perday" in err_str.lower() or "free_tier_requests" in err_str.lower())
             is_not_found = "404" in err_str or "not_found" in err_str.lower()
-            if (is_quota_exceeded or is_not_found) and idx < len(fallbacks) - 1:
+            if (is_daily_quota or is_not_found) and idx < len(fallbacks) - 1:
                 logger.warning(
-                    f"Model {current_model} failed ({'quota exceeded' if is_quota_exceeded else 'not found'}). "
+                    f"Model {current_model} failed ({'daily quota exceeded' if is_daily_quota else 'not found'}). "
                     f"Automatically falling back to {fallbacks[idx+1]}..."
                 )
                 continue
@@ -305,7 +307,6 @@ def classify_segments(context_doc: str, scenes: List[Dict], full_scenes: Optiona
 
 def _mock_classify_segments(scenes: List[Dict]) -> List[Dict]:
     """Fallback rule-based segment classification for offline or failed LLM runs."""
-    import re
     classified = []
     
     # Heuristics keywords
@@ -593,20 +594,20 @@ def select_reel_segments_llm(scenes: List[Dict], target_duration: float, context
 # Phase 1 — EGT/EDL Schema Support
 # ===========================================================================
 
-def classify_egt_segments(segments: List[Dict], context_doc: str) -> List[Dict]:
+def classify_egt_segments(segments: List[Dict], context_doc: str, progress_callback=None) -> List[Dict]:
     """Phase 1 Semantic Perception: Classify EGTSegment dicts using Gemini Flash Lite."""
     if not init_gemini():
         return segments  # Fallback to rule-based scores if no Gemini
 
     try:
         from google.genai import types
-        import pydantic
 
         class SegmentClassification(pydantic.BaseModel):
             segment_type: str = pydantic.Field(description="INTRO, OUTRO, SPEECH, B_ROLL, or SILENCE")
             structural_cue: Optional[str] = pydantic.Field(description="Any narrative transition spoken, e.g. 'let's go outside', 'before we start', or null")
 
         classified_segments = []
+        total = len(segments)
         for i, seg in enumerate(segments):
             # Build 3-min rolling window for context
             rolling = build_rolling_window_summary(segments, i, window_sec=180.0)
@@ -622,7 +623,7 @@ def classify_egt_segments(segments: List[Dict], context_doc: str) -> List[Dict]:
 
             try:
                 response = safe_generate_content(
-                    model="gemini-2.5-flash",
+                    model="gemini-flash-lite-latest",
                     contents=prompt,
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
@@ -634,13 +635,17 @@ def classify_egt_segments(segments: List[Dict], context_doc: str) -> List[Dict]:
                 # Update the segment dict
                 seg["segment_type"] = data.get("segment_type", "SPEECH")
                 seg["structural_cue"] = data.get("structural_cue")
-                seg["perception_model"] = "gemini-2.5-flash"
-            except Exception as e:
+                seg["perception_model"] = "gemini-flash-lite-latest"
+            except pydantic.ValidationError as e:
                 logger.warning(f"Failed to classify segment {seg.get('clip_id')}: {e}")
                 # keep rule-based type fallback signaling
                 seg["perception_model"] = "rule-based-v0"
             
             classified_segments.append(seg)
+
+            # Fire progress callback after each segment so the UI stays alive
+            if progress_callback:
+                progress_callback(i + 1, total)
             
         return classified_segments
     except Exception as e:
@@ -656,7 +661,6 @@ def generate_edl_llm(egt_json: Dict) -> Optional[List[Dict]]:
 
     try:
         from google.genai import types
-        import pydantic
 
         class EDLEntrySchema(pydantic.BaseModel):
             clip_id: str = pydantic.Field(description="Must exactly match a clip_id from the EGT.")

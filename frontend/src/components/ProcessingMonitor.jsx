@@ -27,6 +27,10 @@ export default function ProcessingMonitor({ jobId, onComplete, onFailed, onReset
     } else if (data.stage === 'failed' && !hasFailedRef.current) {
       hasFailedRef.current = true;
       onFailed();
+    } else if (data.stage === 'not_found' && !hasFailedRef.current) {
+      // Server restarted and lost the job — treat as failed so user can reset
+      hasFailedRef.current = true;
+      onFailed();
     }
   }, [onComplete, onFailed]);
 
@@ -58,7 +62,7 @@ export default function ProcessingMonitor({ jobId, onComplete, onFailed, onReset
   const isRunning = currentStage !== 'complete' && currentStage !== 'failed' && currentStage !== 'cancelled';
 
   return (
-    <div className="studio-main fade-in" style={{ height: 'calc(100vh - 60px)', width: '100vw' }}>
+    <div className="studio-main fade-in" style={{ height: '100%', width: '100%' }}>
 
       {/* Center Canvas: Large Progress Ring + Cancel */}
       <div className="studio-canvas" style={{ flexDirection: 'column', gap: '2rem' }}>

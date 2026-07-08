@@ -18,6 +18,7 @@ import logging
 from typing import List, Dict, Optional
 
 from app.models import EGTSegment, EGTDocument, EDLEntry, generate_clip_id
+from app.utils.llm import generate_edl_llm
 
 logger = logging.getLogger("VlogForge.EDL")
 
@@ -89,7 +90,6 @@ def generate_edl(
     )
 
     # 1. Attempt Phase 1 LLM Reasoning
-    from app.utils.llm import generate_edl_llm
     
     # We pass a simplified EGT dictionary to the LLM to save tokens
     egt_json = egt_doc.model_dump()

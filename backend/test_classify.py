@@ -2,8 +2,7 @@ import os
 import sys
 import json
 
-# Add backend to path
-sys.path.append(r"d:\VlogForge\backend")
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from app.utils.llm import classify_egt_segments, init_gemini
 import asyncio
