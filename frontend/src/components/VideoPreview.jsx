@@ -433,7 +433,7 @@ export default function VideoPreview({ jobId, downloadUrl, onReset, onReEdit }) 
   };
 
   return (
-    <div className="studio-main fade-in" style={{ height: 'calc(100vh - 60px)', width: '100vw', display: 'flex', flexDirection: 'column' }}>
+    <div className="studio-main fade-in" style={{ height: '100%', width: '100%', display: 'flex', flexDirection: 'column' }}>
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
 
         {/* Left Sidebar: Transcripts Inspector */}

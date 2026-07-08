@@ -2,6 +2,7 @@ import os
 import sys
 import subprocess
 import json
+import shutil
 import logging
 from typing import List, Dict, Optional
 
@@ -274,7 +275,6 @@ def concatenate_clips_with_crossfade(
 
     # Single-clip passthrough: no crossfade needed
     if n == 1:
-        import shutil
         shutil.copy(clip_paths[0], output_path)
         return True
 
@@ -389,7 +389,6 @@ def assemble_single_pass(edl, file_map, output_path, crossfade_duration=0.075):
 
     Returns True on success, False on failure (caller falls back to multi-pass assembly).
     """
-    import os as _os
     if not edl:
         logger.error("assemble_single_pass: Empty EDL.")
         return False
@@ -400,7 +399,7 @@ def assemble_single_pass(edl, file_map, output_path, crossfade_duration=0.075):
     input_args = []
     for item in edl:
         src = file_map.get(item["video_file"])
-        if not src or not _os.path.exists(src):
+        if not src or not os.path.exists(src):
             logger.error(
                 f"assemble_single_pass: Source not found for "
                 f"{item['video_file']} -> {src}"

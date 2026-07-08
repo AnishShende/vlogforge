@@ -7,6 +7,8 @@ from datetime import datetime
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from dotenv import load_dotenv
+load_dotenv()
 from app.config import settings
 import asyncio
 from pydantic import BaseModel
@@ -19,20 +21,19 @@ from app.tasks.orchestrator import (
     register_websocket,
     unregister_websocket,
     start_pipeline,
-    broadcast_progress
+    broadcast_progress,
+    cancel_job,
+    start_re_reasoning
 )
+from app.tasks.assemble import assemble_vlog
 from app.utils.interaction_logger import interaction_logger
 
-date_str = datetime.utcnow().strftime("%Y-%m-%d")
-app_log_file = os.path.join(settings.log_dir, f"app_{date_str}.log")
-
-# Initialize logger
+# Initialize global stdout logger
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(app_log_file, encoding='utf-8')
+        logging.StreamHandler()
     ]
 )
 logger = logging.getLogger("VlogForge.API")
@@ -135,7 +136,6 @@ def get_job_status(job_id: str):
 @app.post("/api/jobs/{job_id}/cancel")
 def cancel_job_endpoint(job_id: str):
     """Cancel a running editing job."""
-    from app.tasks.orchestrator import cancel_job
     job = get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -270,7 +270,6 @@ async def re_render_job(job_id: str, request: ReRenderRequest):
 
     # Execute the assembly task in a thread pool
     try:
-        from app.tasks.assemble import assemble_vlog
         files_info = [f.model_dump() for f in job.files]
 
         loop = asyncio.get_running_loop()
@@ -323,7 +322,6 @@ async def re_reason_job_endpoint(job_id: str, request: ReReasonRequest):
     job.quality_threshold = request.quality_threshold
 
     # Trigger re-reasoning pipeline
-    from app.tasks.orchestrator import start_re_reasoning
     await start_re_reasoning(job_id, request.quality_threshold)
 
     return {"status": "re-reasoning", "message": "Re-reasoning job started."}
@@ -333,7 +331,7 @@ async def websocket_progress_endpoint(websocket: WebSocket, job_id: str):
     """WebSocket endpoint to push real-time status and progress updates to client."""
     await websocket.accept()
 
-    # If job is already complete or failed, send immediate final state
+    # Send current job state immediately on connect/reconnect
     job = get_job(job_id)
     if job:
         await websocket.send_json({
@@ -342,12 +340,19 @@ async def websocket_progress_endpoint(websocket: WebSocket, job_id: str):
             "message": job.message,
             "download_url": job.output_video_url
         })
+    else:
+        # Job not in memory — server was likely restarted, state was lost
+        await websocket.send_json({
+            "stage": "not_found",
+            "progress": 0,
+            "message": "Job not found. The server may have restarted. Please start a new job.",
+            "download_url": None
+        })
 
     register_websocket(job_id, websocket)
     try:
         # Keep connection open and listen for client messages
         while True:
-            # We don't expect messages from client, but keeping it open
             await websocket.receive_text()
     except WebSocketDisconnect:
         logger.info(f"WebSocket client disconnected from job: {job_id}")
