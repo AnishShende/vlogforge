@@ -8,40 +8,25 @@ from typing import List, Dict, Optional
 
 logger = logging.getLogger("VlogForge.FFmpeg")
 
-def get_ffmpeg_path() -> str:
-    """Find ffmpeg.exe inside the active conda environment or system path."""
-    # Check conda env location
-    conda_bin = os.path.join(sys.prefix, "Library", "bin", "ffmpeg.exe")
-    if os.path.exists(conda_bin):
-        return conda_bin
-    
-    conda_scripts = os.path.join(sys.prefix, "Scripts", "ffmpeg.exe")
-    if os.path.exists(conda_scripts):
-        return conda_scripts
-        
-    conda_root_bin = os.path.join(sys.prefix, "ffmpeg.exe")
-    if os.path.exists(conda_root_bin):
-        return conda_root_bin
+def get_hw_encoder() -> str:
+    """Return the optimal hardware encoder for the current platform."""
+    return "h264_videotoolbox" if sys.platform == "darwin" else "h264_nvenc"
 
-    # Default to system PATH
+def get_ffmpeg_path() -> str:
+    """Find ffmpeg in the active conda environment or system path."""
+    # shutil.which respects the active PATH (and Conda env) on all OSes
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if ffmpeg_bin:
+        return ffmpeg_bin
+    
+    # Fallback if not found (should rarely happen in a properly activated conda env)
     return "ffmpeg"
 
 def get_ffprobe_path() -> str:
-    """Find ffprobe.exe inside the active conda environment or system path."""
-    # Check conda env location
-    conda_bin = os.path.join(sys.prefix, "Library", "bin", "ffprobe.exe")
-    if os.path.exists(conda_bin):
-        return conda_bin
-    
-    conda_scripts = os.path.join(sys.prefix, "Scripts", "ffprobe.exe")
-    if os.path.exists(conda_scripts):
-        return conda_scripts
-        
-    conda_root_bin = os.path.join(sys.prefix, "ffprobe.exe")
-    if os.path.exists(conda_root_bin):
-        return conda_root_bin
-
-    # Default to system PATH
+    """Find ffprobe in the active conda environment or system path."""
+    ffprobe_bin = shutil.which("ffprobe")
+    if ffprobe_bin:
+        return ffprobe_bin
     return "ffprobe"
 
 def get_video_info(video_path: str) -> Dict:
@@ -119,13 +104,14 @@ def extract_keyframe(video_path: str, time_sec: float, output_path: str) -> bool
         return False
 
 def run_ffmpeg_with_gpu_fallback(cmd: List[str]) -> subprocess.CompletedProcess:
-    """Run FFmpeg command. If it uses h264_nvenc and fails, log warning and retry with CPU-based libx264."""
+    """Run FFmpeg command. If it uses a hardware encoder and fails, log warning and retry with CPU-based libx264."""
     try:
         return subprocess.run(cmd, check=True, capture_output=True)
     except subprocess.CalledProcessError as e:
-        if "h264_nvenc" in cmd:
-            logger.warning(f"FFmpeg NVENC encoding failed: {e.stderr.decode()}. Retrying with CPU (libx264)...")
-            fallback_cmd = [arg.replace("h264_nvenc", "libx264") for arg in cmd]
+        hw_encoder = get_hw_encoder()
+        if hw_encoder in cmd:
+            logger.warning(f"FFmpeg {hw_encoder} encoding failed: {e.stderr.decode()}. Retrying with CPU (libx264)...")
+            fallback_cmd = [arg.replace(hw_encoder, "libx264") for arg in cmd]
             try:
                 return subprocess.run(fallback_cmd, check=True, capture_output=True)
             except subprocess.CalledProcessError as fallback_err:
@@ -178,7 +164,7 @@ def process_clip(video_path: str, start_sec: float, end_sec: float, output_path:
             "-filter_complex", f"[0:v]{video_filter}[v];[0:a]loudnorm=I=-14:TP=-1.5:LRA=11[a]",
             "-map", "[v]",
             "-map", "[a]",
-            "-c:v", "h264_nvenc",
+            "-c:v", get_hw_encoder(),
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
             "-b:a", "192k",
@@ -196,7 +182,7 @@ def process_clip(video_path: str, start_sec: float, end_sec: float, output_path:
             "-filter_complex", f"[0:v]{video_filter}[v]",
             "-map", "[v]",
             "-map", "1:a",
-            "-c:v", "h264_nvenc",
+            "-c:v", get_hw_encoder(),
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
             "-b:a", "192k",
@@ -320,7 +306,7 @@ def concatenate_clips_with_crossfade(
         "-filter_complex", filter_complex,
         "-map", "[vout]",
         "-map", "[aout]",
-        "-c:v", "h264_nvenc",
+        "-c:v", get_hw_encoder(),
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
         "-b:a", "192k",
@@ -344,18 +330,18 @@ def apply_fade_effects(video_path: str, output_path: str) -> bool:
         return False
         
     ffmpeg_cmd = get_ffmpeg_path()
+    video_fade_out_start = max(0.0, duration - 1.0)
+    audio_fade_out_start = max(0.0, duration - 0.1)
     
-    fade_out_start = max(0.0, duration - 1.0)
-    
-    video_filter = f"fade=in:st=0:d=0.5,fade=out:st={fade_out_start}:d=1.0"
-    audio_filter = f"afade=in:st=0:d=0.5,afade=out:st={fade_out_start}:d=1.0"
+    video_filter = f"fade=in:st=0:d=0.5,fade=out:st={video_fade_out_start}:d=1.0"
+    audio_filter = f"afade=in:st=0:d=0.5,afade=out:st={audio_fade_out_start}:d=0.1"
     
     cmd = [
         ffmpeg_cmd, "-y",
         "-i", video_path,
         "-vf", video_filter,
         "-af", audio_filter,
-        "-c:v", "h264_nvenc",
+        "-c:v", get_hw_encoder(),
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
         "-b:a", "192k",
@@ -425,45 +411,31 @@ def assemble_single_pass(edl, file_map, output_path, crossfade_duration=0.075):
         audio_trim_parts.append(
             f"[{i}:a]atrim=start={s:.6f}:end={e:.6f},"
             f"asetpts=PTS-STARTPTS,"
+            f"afade=t=in:st=0:d=0.02,afade=t=out:st={e-s-0.02:.6f}:d=0.02,"
             f"dynaudnorm=p=0.9:m=100:s=5:g=15[a{i}]"
         )
 
-    v_inputs = "".join(f"[v{i}]" for i in range(n))
-    video_concat = f"{v_inputs}concat=n={n}:v=1:a=0[vconcated]"
-
-    if n == 1:
-        audio_chain_output = "[a0]"
-        acrossfade_parts = []
-    else:
-        acrossfade_parts = []
-        prev_label = "[a0]"
-        for i in range(1, n):
-            out_label = "[acfout]" if i == n - 1 else f"[acf{i}]"
-            acrossfade_parts.append(
-                f"{prev_label}[a{i}]"
-                f"acrossfade=d={crossfade_duration:.4f}:c1=tri:c2=tri{out_label}"
-            )
-            prev_label = out_label
-        audio_chain_output = "[acfout]"
+    # Use a single concat filter for BOTH video and audio to maintain exact sync
+    va_inputs = "".join(f"[v{i}][a{i}]" for i in range(n))
+    concat_filter = f"{va_inputs}concat=n={n}:v=1:a=1[vconcated][aconcated]"
 
     raw_duration = sum(item["end_sec"] - item["start_sec"] for item in edl)
-    output_duration = raw_duration - crossfade_duration * max(0, n - 1)
-    fade_out_start = max(0.0, output_duration - 1.0)
+    video_fade_out_start = max(0.0, raw_duration - 1.0)
+    audio_fade_out_start = max(0.0, raw_duration - 0.1)
 
     video_fade = (
         f"[vconcated]fade=in:st=0:d=0.5,"
-        f"fade=out:st={fade_out_start:.3f}:d=1.0[vout]"
+        f"fade=out:st={video_fade_out_start:.3f}:d=1.0[vout]"
     )
     audio_fade = (
-        f"{audio_chain_output}afade=in:st=0:d=0.5,"
-        f"afade=out:st={fade_out_start:.3f}:d=1.0[aout]"
+        f"[aconcated]afade=in:st=0:d=0.5,"
+        f"afade=out:st={audio_fade_out_start:.3f}:d=0.1[aout]"
     )
 
     filter_complex = ";".join(
         video_trim_parts
         + audio_trim_parts
-        + [video_concat]
-        + acrossfade_parts
+        + [concat_filter]
         + [video_fade, audio_fade]
     )
 
@@ -473,7 +445,7 @@ def assemble_single_pass(edl, file_map, output_path, crossfade_duration=0.075):
         "-filter_complex", filter_complex,
         "-map", "[vout]",
         "-map", "[aout]",
-        "-c:v", "h264_nvenc",
+        "-c:v", get_hw_encoder(),
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
         "-b:a", "192k",
@@ -481,7 +453,7 @@ def assemble_single_pass(edl, file_map, output_path, crossfade_duration=0.075):
     ]
 
     logger.info(
-        f"Single-pass assembly: {n} clips -> {output_path} ({output_duration:.1f}s)"
+        f"Single-pass assembly: {n} clips -> {output_path} ({raw_duration:.1f}s)"
     )
     try:
         run_ffmpeg_with_gpu_fallback(cmd)

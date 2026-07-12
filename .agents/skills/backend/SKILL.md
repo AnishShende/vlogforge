@@ -9,7 +9,7 @@ description: "The Python FastAPI backend for VlogForge — provides the REST+Web
 - The **backend monorepo root** for VlogForge. Runs as a FastAPI server on port 8000 (default).
 - Houses the complete Python application under `app/`, all tests under `tests/`, and several one-off diagnostic scripts at root level.
 - Entry point: `uvicorn app.main:app` launched from this directory.
-- Diagnostic scripts: `check_egt.py`, `check_ffprobe.py`, `dump_egt.py`, `summarize_egt.py` — standalone tools for inspecting EGT/EDL outputs and verifying environment setup without running the full server.
+- Diagnostic scripts: `debug_pipeline.py`, `check_egt.py`, `check_ffprobe.py`, `dump_egt.py`, `summarize_egt.py` — standalone tools for inspecting EGT/EDL outputs and verifying environment setup without running the full server.
 - `test_classify.py` / `test_phase1.py` at root level are older standalone test scripts (not part of the `pytest` suite in `tests/`).
 - `.env` file in this directory is the single source of `GEMINI_API_KEY` loaded by `config.py`.
 
@@ -25,6 +25,7 @@ description: "The Python FastAPI backend for VlogForge — provides the REST+Web
 
 ## 📂 Code Symbols & Key Files
 
+- [debug_pipeline.py](backend/debug_pipeline.py): CLI tool to inspect a job log and perform 3-way transcript comparison (Raw vs EGT vs EDL) to debug missing cuts and A/V sync drift.
 - [check_egt.py](backend/check_egt.py): CLI tool to validate and pretty-print an EGT JSON file — useful for debugging perception output from a completed job.
 - [check_ffprobe.py](backend/check_ffprobe.py): Verifies ffprobe binary discovery and video metadata parsing from the active conda environment.
 - [dump_egt.py](backend/dump_egt.py): Dumps an EGT JSON from `docs/` to stdout in a human-readable table format.

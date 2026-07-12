@@ -29,6 +29,7 @@ from fastapi import WebSocket
 from app.config import settings
 from app.models import JobStatus, VideoFileInfo, WSProgressEvent, EGTSegment, EGTDocument
 from app.tasks.ingest import ingest_video
+from app.tasks.scene_detect import detect_scenes, subdivide_by_speech_gaps
 from app.tasks.transcribe import transcribe_audio, align_transcript_with_segments
 from app.tasks.analyze import analyze_segments
 from app.tasks.score import score_segments, recompute_bad_takes
@@ -131,7 +132,8 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
     os.makedirs(job_dir, exist_ok=True)
 
     # Set up per-job file logging
-    job_log_file = os.path.join(settings.log_dir, f"job_{job_id}.log")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    job_log_file = os.path.join(settings.log_dir, f"{timestamp}_job_{job_id}.log")
     job_handler = logging.FileHandler(job_log_file, encoding='utf-8')
     job_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
     logging.getLogger().addHandler(job_handler)
@@ -260,11 +262,51 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
         # Align transcripts with EGT segments
         all_segments = align_transcript_with_segments(all_segments, full_transcript_segments)
 
-        # ---- Stage 3: Visual Analysis (Keyframe Description + Tags) ----
+        # ---- Stage 3a: Speech-gap Refinement (duration-relative) ----
         check_cancelled()
-        safe_broadcast("analyzing", 40, "Running visual keyframe analysis...")
+        safe_broadcast("refining", 40, "Refining long segments using speech gaps...")
 
-        analysis_result = analyze_segments(all_segments, context_text)
+        # Compute dynamic thresholds from target_duration
+        dynamic_long_scene = max(
+            settings.long_scene_floor_sec,
+            target_duration * settings.long_scene_ratio,
+        )
+        dynamic_speech_gap = max(
+            settings.speech_gap_floor_sec,
+            target_duration * settings.speech_gap_ratio,
+        )
+        logger.info(
+            f"Dynamic thresholds (target_duration={target_duration:.0f}s): "
+            f"long_scene={dynamic_long_scene:.1f}s, speech_gap={dynamic_speech_gap:.1f}s"
+        )
+
+        # Build per-file CFR path lookup for keyframe extraction
+        for f_info in files_info:
+            cfr_path = f_info.get("cfr_path", "")
+            filename = f_info.get("filename", "")
+            keyframes_dir = os.path.join(job_dir, "keyframes")
+
+            if cfr_path and os.path.exists(cfr_path):
+                all_segments = subdivide_by_speech_gaps(
+                    segments=all_segments,
+                    transcript_segments=full_transcript_segments,
+                    long_scene_threshold_sec=dynamic_long_scene,
+                    speech_gap_sec=dynamic_speech_gap,
+                    video_path=cfr_path,
+                    keyframes_dir=keyframes_dir,
+                    context_notes=context_text,
+                )
+
+        # ---- Stage 3b: Visual Analysis (Keyframe Description + Tags) ----
+        check_cancelled()
+        safe_broadcast("analyzing", 48, "Running visual keyframe analysis...")
+
+        analysis_result = analyze_segments(
+            segments=all_segments, 
+            user_context=context_text,
+            job_dir=job_dir,
+            files_info=files_info
+        )
         all_segments = analysis_result["segments"]
         context_summary = analysis_result["context_summary"]
 
@@ -307,8 +349,13 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
         check_cancelled()
         safe_broadcast("edl_generating", 75, "Generating Edit Decision List (chronological filter)...")
 
-        edl = generate_edl(egt_doc, full_transcript_segments)
+        edl, warning = generate_edl(egt_doc, full_transcript_segments, target_duration, context_text)
         jobs_data_db[job_id]["edl"] = edl
+        if warning:
+            if "warnings" not in jobs_data_db[job_id]:
+                jobs_data_db[job_id]["warnings"] = []
+            jobs_data_db[job_id]["warnings"].append(warning)
+            # You could add safe_broadcast here if a "warning" event type existed on frontend
 
         # Build set of valid clip_ids for assembly validation
         egt_clip_ids = {seg.clip_id for seg in all_segments}
@@ -409,8 +456,12 @@ def run_re_reasoning_sync(job_id: str, quality_threshold: float):
         safe_broadcast("edl_generating", 75, "Re-generating Edit Decision List (AI Reasoning)...")
 
         # 2. Re-run EDL generation
-        edl = generate_edl(egt_doc, [])
+        edl, warning = generate_edl(egt_doc, [], target_duration=None, user_prompt="")
         job_data["edl"] = edl
+        if warning:
+            if "warnings" not in job_data:
+                job_data["warnings"] = []
+            job_data["warnings"].append(warning)
 
         safe_broadcast("assembling", 85, "Assembling video cuts with FFmpeg...")
 

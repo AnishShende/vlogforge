@@ -8,7 +8,7 @@ description: "Pytest test suite for VlogForge backend pipeline components — sp
 ## 📌 Purpose & Responsibility
 - Contains **integration and unit tests** for the backend pipeline.
 - `test_scene_detect.py`: Tests the two-pass cascade scene detection pipeline — verifying ContentDetector, AdaptiveDetector subdivision, short scene merging, fallback behavior, and the integration path through `ingest_video()`.
-- `test_edl.py`: Tests EDL generation logic — validates the Phase 0 mechanical filter (bad-take exclusion, SILENCE removal, INTRO/OUTRO ordering), boundary snapping, and EGT document validation.
+- `test_edl_repair.py` / `test_edl.py`: Tests Tier 3 EDL generation logic — validates the deterministic fallback algorithm (padding trimming, adjacency pre-pass, LOW/MEDIUM drops, and CRITICAL Phase D halting).
 - Tests are run with `pytest` from the `backend/` directory and use real file system paths but mock or stub LLM/FFmpeg calls where appropriate.
 
 ## 🔄 Integration & Data Flow
@@ -29,7 +29,7 @@ description: "Pytest test suite for VlogForge backend pipeline components — sp
   - Fixed-interval fallback when both detectors return empty.
 
 - [test_edl.py](backend/tests/test_edl.py): EDL generation test suite (~280 lines). Tests:
-  - Phase 0 `generate_edl()` with synthetic EGT documents.
+  - Tier 3 `generate_edl()` repair algorithm with synthetic LLM EDL documents.
   - Bad-take filtering, SILENCE filtering.
   - INTRO-first and OUTRO-last ordering.
   - `snap_boundary_to_speech()` correctness with transcript edge cases.

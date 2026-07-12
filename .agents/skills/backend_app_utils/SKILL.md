@@ -34,7 +34,7 @@ description: "Low-level utility modules providing FFmpeg video processing, Googl
   - [transcode_to_cfr](backend/app/utils/ffmpeg.py#L138-L160): Re-encodes VFR video to strict 30fps CFR H.264 (prevents PySceneDetect/Whisper timestamp drift).
   - [process_clip](backend/app/utils/ffmpeg.py#L162-L212): Trims, scales to 1920x1080, normalizes audio to -14 LUFS (loudnorm). GPU-accelerated with CPU fallback.
   - [concatenate_clips_with_crossfade](backend/app/utils/ffmpeg.py#L254-L300+): Builds a dynamic `filter_complex` graph for sequential audio crossfades (75ms acrossfade). Falls back to hard-concat for >30 clips.
-  - `apply_fade_effects` / `assemble_single_pass`: Final rendering passes (single-pass filtergraph preferred).
+  - `apply_fade_effects` / `assemble_single_pass`: Final rendering passes. Implements decoupled video and audio fades (1.0s visual fade to black, 0.1s audio fade) to prevent cutting off OUTRO speech.
 
 - [llm.py](backend/app/utils/llm.py): Gemini API integration hub. Key functions:
   - [init_gemini](backend/app/utils/llm.py#L17-L34): Lazy singleton initialization of the `genai.Client`. Returns False if API key missing (triggers mock mode).
@@ -44,7 +44,7 @@ description: "Low-level utility modules providing FFmpeg video processing, Googl
   - [synthesize_context](backend/app/utils/llm.py#L146-L173): Builds the Context Document from strided transcript + visual samples.
   - [build_rolling_window_summary](backend/app/utils/llm.py#L175-L205): Constructs a preceding 180-second transcript window string for per-segment classification context.
   - `classify_segments`, `classify_egt_segments`: Per-segment LLM classification calls with rolling context.
-  - `generate_edl_llm`, `select_reel_segments_llm`, `sequence_edl_segments`: LLM-powered EDL reasoning functions.
+  - `generate_edl_llm`, `select_reel_segments_llm`, `sequence_edl_segments`: LLM-powered EDL reasoning functions. `generate_edl_llm` implements **Tier 2 (Propose)** of the Neurosymbolic architecture, generating an ordered EDL where every clip has a `narrative_priority` (LOW/MEDIUM/CRITICAL) and a strict `core` boundary alongside wider `start_sec`/`end_sec` padding.
   - `transcribe_audio_gemini`: Gemini-based STT (used as primary before Whisper fallback).
 
 - [interaction_logger.py](backend/app/utils/interaction_logger.py): Singleton `InteractionLogger` class.
