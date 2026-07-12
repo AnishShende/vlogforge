@@ -15,7 +15,7 @@ The full reasoning pipeline (edl_v1.py) is preserved in tasks/reasoning/ for Pha
 """
 
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 
 from app.models import EGTSegment, EGTDocument, EDLEntry, generate_clip_id
 from app.utils.llm import generate_edl_llm
@@ -66,7 +66,9 @@ def snap_boundary_to_speech(
 def generate_edl(
     egt_doc: EGTDocument,
     transcript_segments: Optional[List[Dict]] = None,
-) -> List[Dict]:
+    target_duration: Optional[float] = None,
+    user_prompt: str = ""
+) -> Tuple[List[Dict], Optional[str]]:
     """Generate the Phase 0 EDL from a validated EGTDocument.
 
     Phase 0 algorithm:
@@ -93,33 +95,122 @@ def generate_edl(
     
     # We pass a simplified EGT dictionary to the LLM to save tokens
     egt_json = egt_doc.model_dump()
-    llm_edl_dicts = generate_edl_llm(egt_json)
+    llm_edl_dicts = generate_edl_llm(egt_json, target_duration, user_prompt)
     
     if llm_edl_dicts:
         logger.info(f"Phase 1 LLM returned {len(llm_edl_dicts)} EDL entries.")
-        # Re-map start and end times to snap to speech boundaries
-        final_edl_dicts = []
+        
+        # 1. Parse into EDLEntry objects and enrich with quality_score
+        entries = []
         for idx, entry in enumerate(llm_edl_dicts):
+            orig_seg = next((s for s in segments if s.clip_id == entry.get("clip_id")), None)
+            quality_score = orig_seg.quality_score if orig_seg else 0.0
+            
             start_sec = entry.get("start_sec", 0.0)
             end_sec = entry.get("end_sec", 0.0)
+            core_start_sec = entry.get("core_start_sec")
+            core_end_sec = entry.get("core_end_sec")
             
-            if transcript_segments:
-                start_sec, end_sec = snap_boundary_to_speech(
-                    start_sec, end_sec, entry.get("source_file", ""), transcript_segments
-                )
-            
-            # Reconstruct dict strictly to the EDLEntry schema
-            final_entry = EDLEntry(
+            if core_start_sec is None or core_start_sec < start_sec:
+                core_start_sec = start_sec
+            if core_end_sec is None or core_end_sec > end_sec:
+                core_end_sec = end_sec
+                
+            e = EDLEntry(
                 clip_id=entry.get("clip_id"),
                 source_file=entry.get("source_file"),
                 start_sec=start_sec,
                 end_sec=end_sec,
+                core_start_sec=core_start_sec,
+                core_end_sec=core_end_sec,
+                narrative_priority=entry.get("narrative_priority", "MEDIUM"),
+                quality_score=quality_score,
                 editorial_type=entry.get("editorial_type", "KEEP"),
                 sequence_index=idx
             )
-            final_edl_dicts.append(final_entry.model_dump())
+            entries.append(e)
+
+        # 2. Pre-pass: Adjacency Risk Safeguard
+        # Heuristic: Upgrade LOW clips to MEDIUM if sandwiched between CRITICAL clips from different files.
+        # Note for v1: This is a fast approximation to prevent jarring jump cuts.
+        # It will over-trigger when different files are actually a continuous take (e.g., camera auto-split),
+        # and it will under-trigger for same-file time gaps (e.g., jump cuts within a single long recording).
+        for i in range(1, len(entries) - 1):
+            if entries[i].narrative_priority == "LOW":
+                prev_e = entries[i-1]
+                next_e = entries[i+1]
+                if prev_e.narrative_priority == "CRITICAL" and next_e.narrative_priority == "CRITICAL":
+                    if prev_e.source_file != next_e.source_file:
+                        logger.info(f"Adjacency safeguard: Upgrading clip {entries[i].clip_id} from LOW to MEDIUM to prevent jump cut.")
+                        entries[i].narrative_priority = "MEDIUM"
+
+        # 3. Budget Enforcement (Tier 3 Repair)
+        warning_msg = None
+        if target_duration:
+            def get_total_dur(edl_list):
+                return sum(e.end_sec - e.start_sec for e in edl_list)
+
+            # Phase A: Trim padding for LOW and MEDIUM
+            if get_total_dur(entries) > target_duration:
+                for e in entries:
+                    if e.narrative_priority in ["LOW", "MEDIUM"]:
+                        e.start_sec = e.core_start_sec
+                        e.end_sec = e.core_end_sec
+
+            # Phase B: Drop LOW
+            if get_total_dur(entries) > target_duration:
+                low_clips = sorted([e for e in entries if e.narrative_priority == "LOW"], key=lambda x: x.quality_score)
+                for e in low_clips:
+                    if get_total_dur(entries) <= target_duration:
+                        break
+                    entries.remove(e)
+
+            # Phase C: Drop MEDIUM
+            if get_total_dur(entries) > target_duration:
+                med_clips = sorted([e for e in entries if e.narrative_priority == "MEDIUM"], key=lambda x: x.quality_score)
+                for e in med_clips:
+                    if get_total_dur(entries) <= target_duration:
+                        break
+                    entries.remove(e)
+                    
+            # Phase C.5: Trim CRITICAL padding
+            if get_total_dur(entries) > target_duration:
+                for e in entries:
+                    if e.narrative_priority == "CRITICAL":
+                        e.start_sec = e.core_start_sec
+                        e.end_sec = e.core_end_sec
+
+            # Phase D: CRITICAL Exhaustion
+            final_dur = get_total_dur(entries)
+            if final_dur > target_duration + 0.1:
+                warning_msg = f"Budget Exceeded: Target duration is {target_duration}s, but mandatory CRITICAL clips alone total {final_dur:.1f}s. Halted repair to preserve narrative integrity."
+                logger.warning(warning_msg)
+
+        # 4. Snap boundaries & Finalize
+        final_edl_dicts = []
+        for idx, entry in enumerate(entries):
+            start_sec = entry.start_sec
+            end_sec = entry.end_sec
             
-        return final_edl_dicts
+            if transcript_segments:
+                orig_seg = next((s for s in segments if s.clip_id == entry.clip_id), None)
+                snapped_start, snapped_end = snap_boundary_to_speech(
+                    start_sec, end_sec, entry.source_file, transcript_segments
+                )
+                
+                if orig_seg:
+                    if abs(start_sec - orig_seg.start_sec) > 0.1:
+                        snapped_start = start_sec
+                    if abs(end_sec - orig_seg.end_sec) > 0.1:
+                        snapped_end = end_sec
+                        
+                entry.start_sec = snapped_start
+                entry.end_sec = snapped_end
+            
+            entry.sequence_index = idx
+            final_edl_dicts.append(entry.model_dump())
+            
+        return final_edl_dicts, warning_msg
 
     # 2. Fallback to Phase 0 Mechanical Filter
     logger.warning("Phase 1 Reasoning failed or returned empty. Falling back to Phase 0 mechanical filter.")
@@ -154,7 +245,7 @@ def generate_edl(
 
     if not kept:
         logger.warning("EDL is empty after filtering — all segments were bad takes or silence.")
-        return []
+        return [], None
 
     # Sort by (source_file, start_sec) to preserve multi-file chronology
     kept.sort(key=lambda s: (s.source_file, s.start_sec))
@@ -166,7 +257,7 @@ def generate_edl(
 
     ordered = intros + middle + outros
 
-    edl_entries = []
+    final_edl_dicts = []
     for idx, seg in enumerate(ordered):
         start_sec = seg.start_sec
         end_sec = seg.end_sec
@@ -176,27 +267,18 @@ def generate_edl(
                 start_sec, end_sec, seg.source_file, transcript_segments
             )
 
-        if seg.segment_type == "INTRO":
-            editorial_type = "INTRO"
-        elif seg.segment_type == "OUTRO":
-            editorial_type = "OUTRO"
-        else:
-            editorial_type = "KEEP"
-
-        entry = EDLEntry(
+        final_entry = EDLEntry(
             clip_id=seg.clip_id,
             source_file=seg.source_file,
-            start_sec=start_sec,
-            end_sec=end_sec,
-            editorial_type=editorial_type,
-            sequence_index=idx,
+            start_sec=seg.start_sec,
+            end_sec=seg.end_sec,
+            core_start_sec=seg.start_sec,
+            core_end_sec=seg.end_sec,
+            narrative_priority="MEDIUM",
+            quality_score=seg.quality_score,
+            editorial_type=seg.segment_type if seg.segment_type in ["INTRO", "OUTRO"] else "KEEP",
+            sequence_index=idx
         )
-        edl_entries.append(entry)
+        final_edl_dicts.append(final_entry.model_dump())
 
-    total_duration = sum(e.end_sec - e.start_sec for e in edl_entries)
-    logger.info(
-        f"Phase 0 Fallback EDL generation complete: {len(edl_entries)} entries, "
-        f"total duration: {total_duration:.1f}s"
-    )
-
-    return [entry.model_dump() for entry in edl_entries]
+    return final_edl_dicts, None
