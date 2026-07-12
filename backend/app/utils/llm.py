@@ -44,7 +44,7 @@ def with_gemini_retry(max_retries=5, base_delay=5.0):
                 except Exception as e:
                     err_str = str(e)
                     is_rate_limit = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
-                    is_daily_quota = "quota" in err_str.lower() and ("perday" in err_str.lower() or "free_tier_requests" in err_str.lower())
+                    is_daily_quota = "quota" in err_str.lower() and ("perday" in err_str.lower() or "per_day" in err_str.lower())
                     
                     if is_daily_quota:
                         logger.error("Gemini API daily quota limit exceeded. Failing immediately to trigger model fallback.")
@@ -115,12 +115,24 @@ def safe_generate_content(*args, **kwargs):
     # Fallback to the original model call if somehow loop terminates without raising (failsafe)
     return _gemini_client.models.generate_content(*args, **kwargs)
 
-def describe_keyframe(image_path: str, context_notes: str = "") -> str:
-    """Describe a keyframe image using Gemini Multimodal, or return a mock description."""
+def describe_keyframe(image_path: str, context_notes: str = "", classify_content: bool = False) -> str:
+    """Describe a keyframe image using Gemini Multimodal, or return a mock description.
+
+    Args:
+        image_path: Path to the keyframe JPEG.
+        context_notes: Optional user-provided context about the vlog.
+        classify_content: If True, also classify whether the frame shows
+            meaningful visual content. Returns a tuple (description, bool)
+            instead of just a string.
+
+    Returns:
+        str description, OR tuple (str, bool) when classify_content=True.
+    """
     if not init_gemini():
         # Mock description based on file location
         filename = os.path.basename(image_path)
-        return f"Mock visual: Visual scene from keyframe {filename}. Shows a vlogger setting up their shot with active movement."
+        desc = f"Mock visual: Visual scene from keyframe {filename}. Shows a vlogger setting up their shot with active movement."
+        return (desc, True) if classify_content else desc
 
     try:
         # Load image using PIL
@@ -131,17 +143,89 @@ def describe_keyframe(image_path: str, context_notes: str = "") -> str:
             "Keep the description concise (1-2 sentences), focusing on subjects, lighting, "
             "actions, and visual interest. "
         )
+        if classify_content:
+            prompt += (
+                "After the description, on a NEW LINE write exactly "
+                "'MEANINGFUL: YES' if the frame shows intentional visual content "
+                "(a person, an activity, a scenic view, a product, a demonstration, etc.) "
+                "or 'MEANINGFUL: NO' if the frame is dead air (empty room, blurred/dark, "
+                "ceiling/floor shot, no subject, nothing happening)."
+            )
         if context_notes:
-            prompt += f"Context notes for the vlog: {context_notes}"
+            prompt += f" Context notes for the vlog: {context_notes}"
             
         response = safe_generate_content(
             model="gemini-flash-lite-latest",
             contents=[prompt, img]
         )
-        return response.text.strip()
+        text = response.text.strip()
+
+        if classify_content:
+            # Parse out the meaningful content flag
+            lines = text.split("\n")
+            has_meaningful = True  # Default to preserving (conservative)
+            description_lines = []
+            for line in lines:
+                if "MEANINGFUL:" in line.upper():
+                    has_meaningful = "YES" in line.upper()
+                else:
+                    description_lines.append(line)
+            
+            return ("\n".join(description_lines).strip(), has_meaningful)
+        return text
     except Exception as e:
-        logger.error(f"Gemini keyframe description failed: {e}. Falling back to mock.")
-        return "Visual: Vlogger in frame, speaking directly to the camera with soft indoor lighting."
+        logger.error(f"Gemini multimodal keyframe description failed: {e}")
+        return ("Visual description unavailable due to API error.", True) if classify_content else "Visual description unavailable due to API error."
+
+def describe_keyframes_batch(image_paths: List[str], context_notes: str = "") -> List[str]:
+    """Describe a batch of keyframe images using Gemini Multimodal in a single API call."""
+    if not init_gemini():
+        return [f"Mock visual: Visual scene from keyframe {os.path.basename(p)}." for p in image_paths]
+    
+    if not image_paths:
+        return []
+        
+    try:
+        from google.genai import types
+        import pydantic
+        
+        # Load all images
+        images = [Image.open(p) for p in image_paths]
+        
+        prompt = (
+            f"I am providing {len(images)} keyframe images from a video vlog in chronological order. "
+            "Return a JSON list of strings, where each string is a concise (1-2 sentences) "
+            "description of the corresponding image. "
+            "Focus on subjects, lighting, actions, and visual interest.\n"
+        )
+        if context_notes:
+            prompt += f"Context notes: {context_notes}\n"
+            
+        class BatchDescSchema(pydantic.BaseModel):
+            descriptions: List[str]
+            
+        contents = [prompt] + images
+        response = safe_generate_content(
+            model="gemini-flash-lite-latest",
+            contents=contents,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=BatchDescSchema
+            )
+        )
+        
+        data = json.loads(response.text.strip())
+        descs = data.get("descriptions", [])
+        
+        # Fallback if length doesn't match
+        if len(descs) != len(image_paths):
+            logger.warning(f"Batch description count mismatch: got {len(descs)}, expected {len(image_paths)}. Falling back to sequential.")
+            return [describe_keyframe(p, context_notes) for p in image_paths]
+            
+        return descs
+    except Exception as e:
+        logger.error(f"Failed describe_keyframes_batch: {e}. Falling back to sequential.")
+        return [describe_keyframe(p, context_notes) for p in image_paths]
 
 def synthesize_context(transcripts: List[Dict], visual_descriptions: List[str], user_context: str = "") -> str:
     """Summarize the transcripts, keyframes, and user context into a coherent topic/mood document."""
@@ -653,7 +737,7 @@ def classify_egt_segments(segments: List[Dict], context_doc: str, progress_callb
         return segments
 
 
-def generate_edl_llm(egt_json: Dict) -> Optional[List[Dict]]:
+def generate_edl_llm(egt_json: Dict, target_duration: Optional[float] = None, user_prompt: str = "") -> Optional[List[Dict]]:
     """Phase 1 Reasoning: Generate a narrative, deduplicated EDL from the EGT."""
     if not init_gemini():
         logger.error("Gemini not initialized, cannot run Phase 1 Reasoning.")
@@ -665,13 +749,16 @@ def generate_edl_llm(egt_json: Dict) -> Optional[List[Dict]]:
         class EDLEntrySchema(pydantic.BaseModel):
             clip_id: str = pydantic.Field(description="Must exactly match a clip_id from the EGT.")
             source_file: str = pydantic.Field(description="Must exactly match the source_file of the chosen clip_id.")
-            start_sec: float = pydantic.Field(description="Start time from the EGT segment.")
-            end_sec: float = pydantic.Field(description="End time from the EGT segment.")
+            start_sec: float = pydantic.Field(description="Start time of the clip including padding/breathing room. Absolute timestamp in the raw footage.")
+            end_sec: float = pydantic.Field(description="End time of the clip including padding/breathing room. Absolute timestamp in the raw footage.")
+            core_start_sec: float = pydantic.Field(description="The absolute start timestamp of the essential payload of the clip (minimum safe bound). Must be >= start_sec.")
+            core_end_sec: float = pydantic.Field(description="The absolute end timestamp of the essential payload of the clip (minimum safe bound). Must be <= end_sec.")
+            narrative_priority: str = pydantic.Field(description="Enum: LOW, MEDIUM, or CRITICAL. CRITICAL for explicit cues, intros/outros. LOW for purely filler/B-roll.")
             editorial_type: str = pydantic.Field(description="KEEP, INTRO, or OUTRO")
             sequence_index: int = pydantic.Field(description="0-indexed position in final timeline")
 
         class EDLSchema(pydantic.BaseModel):
-            chain_of_thought: str = pydantic.Field(description="Think step-by-step about which clips are redundant/bad takes, and what structural cues imply reordering.")
+            chain_of_thought: str = pydantic.Field(description="Think step-by-step about which clips are redundant/bad takes, and explain any micro-trimming of start_sec/end_sec you perform based on the visual timeline.")
             edl: List[EDLEntrySchema]
 
         prompt = (
@@ -684,8 +771,19 @@ def generate_edl_llm(egt_json: Dict) -> Optional[List[Dict]]:
             "3. DEDUPLICATION & BAD TAKES: The EGT contains unedited raw takes. If the speaker stumbles, restarts a sentence, or repeats a phrase across multiple clips, "
             "you MUST DROP the redundant/bad takes (even if they have high quality scores) and ONLY KEEP the best, cleanest take to form a coherent sentence. Be ruthless with deduplication.\n"
             "4. MACRO-PACING: Ensure an INTRO is first (editorial_type: INTRO) and an OUTRO is last (editorial_type: OUTRO). All others are KEEP.\n"
-            "5. NO SILENCE: Drop clips that are classified as SILENCE unless they are essential B-Roll.\n\n"
-            f"=== EDITORIAL GROUND TRUTH (EGT) ===\n"
+            "5. NO SILENCE: Drop clips that are classified as SILENCE unless they are essential B-Roll.\n"
+            "6. MICRO-TRIMMING & PADDING (CRITICAL): Set `core_start_sec` and `core_end_sec` to bound the strict essential payload of the clip (e.g., the exact words of a sentence, or the exact action). Set `start_sec` and `end_sec` wider to include breathing room (padding) around the core payload. If the visual timeline shows bad framing (e.g., subject walks out of frame) AND audio is feeble, aggressively cut BOTH the core bounds and the outer bounds to avoid that bad footage.\n"
+            "7. NARRATIVE PRIORITY (CRITICAL): Assign `narrative_priority` to every clip:\n"
+            "   - `CRITICAL`: Explicit cues ('look at this'), mandatory narrative anchors, and INTRO/OUTRO. These can never be dropped.\n"
+            "   - `MEDIUM`: Standard speech or action that advances the storyline.\n"
+            "   - `LOW`: Purely filler, B-roll, or highly redundant takes that can be safely dropped if the video budget is tight.\n"
+        )
+        
+        if user_prompt:
+            prompt += f"8. USER INSTRUCTION: '{user_prompt}'. Prioritize content that matches this instruction.\n"
+
+        prompt += (
+            f"\n=== EDITORIAL GROUND TRUTH (EGT) ===\n"
             f"{json.dumps(egt_json, indent=2)}\n\n"
             "Output the final EDL as a strictly validated JSON array according to the schema."
         )

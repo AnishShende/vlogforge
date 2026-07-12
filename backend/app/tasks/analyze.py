@@ -10,33 +10,76 @@ logger = logging.getLogger("VlogForge.Analyze")
 CONTEXT_SAMPLE_COUNT = 10
 
 
+import os
+from app.utils.ffmpeg import extract_keyframe
+
 def analyze_segments(
     segments: List[EGTSegment],
     user_context: str,
+    job_dir: str = "",
+    files_info: List[Dict] = None
 ) -> Dict:
     """Run visual description for each EGT segment and generate a synthesized Context Document.
-
-    Strided Sampling Engine:
-    The Context Document is built from a uniform stride-sampled subset of segments rather
-    than just the first 10. Stride S = len(segments) / CONTEXT_SAMPLE_COUNT, so samples
-    are drawn at indices 0, S, 2S, ... covering the full timeline evenly. This prevents
-    the AI from being biased toward introductory content on long vlogs.
-
-    Returns:
-        dict with:
-            - segments: List[EGTSegment] (mutated with visual_description and tags)
-            - context_summary: str (synthesized context document)
     """
     logger.info(f"Analyzing {len(segments)} segments...")
 
+    files_info = files_info or []
+    cfr_lookup = {f.get("filename"): f.get("cfr_path") for f in files_info}
+    keyframes_dir = os.path.join(job_dir, "keyframes") if job_dir else ""
+
     # Step 1: Describe each segment's keyframe and extract tags
     for seg in segments:
-        kf_path = seg.keyframe_path
-        if kf_path:
-            logger.info(f"Analyzing keyframe: {kf_path}")
-            description = describe_keyframe(kf_path, user_context)
+        duration = seg.end_sec - seg.start_sec
+        
+        # Dense sampling for long scenes
+        if duration > 10.0 and job_dir and seg.source_file in cfr_lookup:
+            logger.info(f"Dense sampling for long segment ({duration:.1f}s): {seg.clip_id}")
+            cfr_path = cfr_lookup[seg.source_file]
+            
+            # Sample every 5 seconds, starting at 2.5s
+            timestamps = []
+            t = seg.start_sec + 2.5
+            while t < seg.end_sec:
+                timestamps.append(t)
+                t += 5.0
+            
+            if not timestamps:
+                # Fallback to midpoint if duration math somehow fails
+                timestamps = [seg.start_sec + duration / 2.0]
+                
+            dense_paths = []
+            valid_t = []
+            for t in timestamps:
+                kf_filename = f"{seg.clip_id}_dense_{t:.0f}.jpg"
+                kf_path = os.path.join(keyframes_dir, kf_filename)
+                
+                if extract_keyframe(cfr_path, t, kf_path):
+                    dense_paths.append(kf_path)
+                    valid_t.append(t)
+                    seg.keyframe_paths.append(kf_path)
+                else:
+                    logger.warning(f"Failed to extract dense keyframe at {t}s for {seg.clip_id}")
+            
+            if dense_paths:
+                from app.utils.llm import describe_keyframes_batch
+                batch_descs = describe_keyframes_batch(dense_paths, user_context)
+                
+                descriptions = []
+                for t, desc in zip(valid_t, batch_descs):
+                    rel_t = t - seg.start_sec
+                    descriptions.append(f"[{rel_t:.1f}s] {desc}")
+                    
+                description = " Timeline: " + " | ".join(descriptions)
+            else:
+                description = "Visual description unavailable."
         else:
-            description = "Visual description unavailable."
+            # Standard single keyframe logic
+            kf_path = seg.keyframe_path
+            if kf_path:
+                logger.info(f"Analyzing keyframe: {kf_path}")
+                description = describe_keyframe(kf_path, user_context)
+            else:
+                description = "Visual description unavailable."
 
         seg.visual_description = description
 

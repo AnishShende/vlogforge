@@ -54,7 +54,8 @@ class EGTSegment(BaseModel):
 
     # === Visual ===
     visual_description: str = ""                        # Short text from vision model
-    keyframe_path: Optional[str] = None                 # Path to extracted keyframe JPEG
+    keyframe_path: Optional[str] = None                 # Path to primary extracted keyframe JPEG
+    keyframe_paths: List[str] = Field(default_factory=list) # Paths to denser keyframes for long segments
 
     # === Classification (Perception layer — cheap model / rule-based) ===
     segment_type: str = "SPEECH"                        # INTRO | OUTRO | SPEECH | B_ROLL | SILENCE
@@ -124,6 +125,10 @@ class EDLEntry(BaseModel):
     source_file: str                                    # Denormalized for assembly convenience
     start_sec: float
     end_sec: float
+    core_start_sec: Optional[float] = None              # Minimum safe bound
+    core_end_sec: Optional[float] = None                # Minimum safe bound
+    narrative_priority: str = "MEDIUM"                  # LOW | MEDIUM | CRITICAL
+    quality_score: float = 0.0                          # Pass 1 quality score for tie-breaking
     editorial_type: str = "KEEP"                        # KEEP | INTRO | OUTRO
     sequence_index: int = 0                             # Position in final timeline
 

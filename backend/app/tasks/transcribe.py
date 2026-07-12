@@ -27,23 +27,23 @@ def get_whisper_model():
         try:
             from faster_whisper import WhisperModel
             import numpy as np
-            logger.info("Initializing faster-whisper Model (tiny)...")
+            logger.info("Initializing faster-whisper Model (large-v3)...")
             # Attempt to load on GPU first
             try:
-                logger.info("Trying to initialize Whisper on GPU (CUDA)...")
-                model = WhisperModel("tiny", device="cuda", compute_type="float16")
+                logger.info("Trying to initialize Whisper automaticallys (CUDA/CPU)...")
+                model = WhisperModel("large-v3", device="auto", compute_type="default")
 
-                # Dry run to force-load CUDA DLLs (like cublas64_12.dll) in the initialization stage
-                logger.info("Performing CUDA dry-run to verify DLL integrity...")
-                dummy_audio = np.zeros(16000, dtype=np.float32)  # 1 second of silence
+                # Dry run to force-load libraries
+                logger.info("Performing dry-run to verify integrity...")
+                dummy_audio = np.zeros(16000, dtype=np.float32)  # 1 secosnd of silence
                 list(model.transcribe(dummy_audio))
 
                 _whisper_model = model
-                logger.info("Whisper Model loaded successfully on GPU (CUDA).")
-            except Exception as cuda_err:
-                logger.warning(f"CUDA initialization or dry-run failed: {cuda_err}. Falling back to CPU...")
+                logger.info("Whisper Model loaded successfully.")
+            except Exception as auto_err:
+                logger.warning(f"Auto initialization or dry-run failed: {auto_err}. Falling back to CPU...")
                 # Fallback to CPU
-                _whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
+                _whisper_model = WhisperModel("medium", device="cpu", compute_type="int8")
                 logger.info("Whisper Model loaded successfully on CPU.")
             return _whisper_model
         except Exception as e:
@@ -60,36 +60,60 @@ def transcribe_audio(audio_path: str, status_callback=None) -> List[Dict]:
     if not audio_path or not os.path.exists(audio_path):
         return []
 
-    # Attempt Gemini 1.5 Flash Lite STT
+    # Attempt local faster-whisper FIRST for accurate timestamps
     if status_callback:
-        status_callback("using Gemini 1.5 Flash Lite STT")
+        status_callback("using local Whisper STT")
+    logger.info("Attempting Speech-to-Text using local faster-whisper...")
+    model = get_whisper_model()
+    
+    if model is not None:
+        try:
+            segments, info = model.transcribe(
+                audio_path,
+                beam_size=5,
+                condition_on_previous_text=False,
+                vad_filter=True,
+                vad_parameters=dict(
+                    min_speech_duration_ms=100,   # Catch short single-syllable trailing words like "Bye!"
+                    min_silence_duration_ms=500,  # Tightly strip silences > 0.5s to expose pure gaps to the pipeline
+                    speech_pad_ms=400             # Ensure start/end syllables aren't chopped off by VAD borders
+                ),
+                word_timestamps=True
+            )
+            transcription_results = []
+            for segment in segments:
+                if segment.words:
+                    for word in segment.words:
+                        transcription_results.append({
+                            "start": word.start,
+                            "end": word.end,
+                            "text": word.word.strip()
+                        })
+                else:
+                    transcription_results.append({
+                        "start": segment.start,
+                        "end": segment.end,
+                        "text": segment.text.strip()
+                    })
+            logger.info(f"Whisper STT completed with {len(transcription_results)} segments/words.")
+            return transcription_results
+        except Exception as e:
+            logger.error(f"Whisper transcription failed: {e}. Falling back to Gemini STT.")
+    else:
+        logger.warning("Local Whisper model unavailable. Falling back to Gemini STT.")
+
+    # Fallback to Gemini 1.5 Flash Lite STT
+    if status_callback:
+        status_callback("Fallback: using Gemini 1.5 Flash Lite STT")
     logger.info("Attempting Speech-to-Text using Gemini 1.5 Flash Lite...")
     gemini_result = transcribe_audio_gemini(audio_path)
     if gemini_result:
         logger.info(f"Gemini 1.5 Flash Lite STT completed with {len(gemini_result)} segments.")
         return gemini_result
 
-    # Fallback to local faster-whisper
-    if status_callback:
-        status_callback("Fallback: using local Whisper")
-    logger.warning("Gemini 1.5 Flash Lite STT unavailable or failed. Falling back to local Whisper model...")
-    model = get_whisper_model()
-    if model is None:
-        return _mock_transcribe(audio_path)
-
-    try:
-        segments, info = model.transcribe(audio_path, beam_size=5)
-        transcription_results = []
-        for segment in segments:
-            transcription_results.append({
-                "start": segment.start,
-                "end": segment.end,
-                "text": segment.text.strip()
-            })
-        return transcription_results
-    except Exception as e:
-        logger.error(f"Whisper transcription failed: {e}. Falling back to mock.")
-        return _mock_transcribe(audio_path)
+    # Final fallback
+    logger.warning("All STT methods failed. Falling back to mock transcription.")
+    return _mock_transcribe(audio_path)
 
 
 def align_transcript_with_segments(

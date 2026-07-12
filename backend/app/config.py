@@ -12,6 +12,18 @@ class Settings(BaseSettings):
     # Phase 0: Quality scoring
     quality_threshold: float = 0.35     # Absolute bad-take threshold (0–1). Conservative default.
 
+    # Scene Detection (two-pass cascade)
+    content_detector_threshold: float = 27.0    # ContentDetector HSV delta threshold
+    adaptive_detector_threshold: float = 3.0    # AdaptiveDetector rolling average threshold
+    long_scene_threshold_sec: float = 15.0      # Scenes longer than this trigger adaptive sub-detection
+    min_scene_duration_sec: float = 1.0         # Scenes shorter than this are merged into neighbors
+
+    # Speech-gap subdivision (duration-relative)
+    long_scene_ratio: float = 0.10              # Scenes > ratio × target_duration trigger speech-gap splitting
+    long_scene_floor_sec: float = 5.0           # Absolute floor: never consider scenes < this as "long"
+    speech_gap_ratio: float = 0.03              # Gaps > ratio × target_duration are split candidates
+    speech_gap_floor_sec: float = 1.5           # Absolute floor: never split on gaps shorter than this
+
     # Model tiering
     perception_model: str = "gemini-2.0-flash-lite"   # Cheap model for Pass 1 classification
     reasoning_model: str = "gemini-2.5-flash"         # Frontier model for Pass 2 reasoning (Phase 1+)
