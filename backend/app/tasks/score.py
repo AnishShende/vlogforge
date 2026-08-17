@@ -16,7 +16,7 @@ from typing import List
 
 from app.models import EGTSegment
 from app.config import settings
-from app.utils.llm import classify_egt_segments
+from app.utils.llm import classify_egt_segments, classify_egt_segments_batch
 
 logger = logging.getLogger("VlogForge.Score")
 
@@ -149,6 +149,12 @@ def compute_quality_score(segment: EGTSegment) -> tuple:
         score -= 0.10
         flags.append("short")
 
+    # --- Signal 1.5: Fragmented Short Speech ---
+    # 1 to 3 words total on a short segment usually means a stumble or incomplete utterance
+    if segment.segment_type == "SPEECH" and 0 < word_count <= 3 and duration < 3.0:
+        score -= 0.70  # Aggressively penalize to force below threshold
+        flags.append("short_speech_fragment")
+
     # --- Signal 2: Disfluency ratio ---
     if word_count > 0:
         disfluency_count = sum(1 for w in words if w in DISFLUENCY_WORDS)
@@ -220,10 +226,14 @@ def score_segments(
 
     bad_take_count = 0
 
-    # Step 1: Semantic Classification via LLM
-    # We pass the segments as dicts to the LLM, then merge back the results
+    # Step 1: Semantic Classification via LLM (M4: batch path for scale)
+    # We pass the segments as dicts to the LLM, then merge back the results.
+    # classify_egt_segments_batch fires progress_callback per-batch (N/10 calls),
+    # which keeps the WebSocket progress bar alive during long jobs.
     segment_dicts = [seg.model_dump() for seg in segments]
-    classified_dicts = classify_egt_segments(segment_dicts, context_doc, progress_callback=progress_callback)
+    classified_dicts = classify_egt_segments_batch(
+        segment_dicts, context_doc, progress_callback=progress_callback
+    )
     
     # Merge results
     for idx, (seg, classified) in enumerate(zip(segments, classified_dicts)):

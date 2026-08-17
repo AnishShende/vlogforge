@@ -47,6 +47,21 @@ def get_video_info(video_path: str) -> Dict:
         logger.error(f"Failed to probe video {video_path}: {e}")
         raise RuntimeError(f"Probe failed: {e}")
 
+def is_cfr(video_path: str) -> bool:
+    """Check if the video is already Constant Frame Rate (CFR)."""
+    try:
+        info = get_video_info(video_path)
+        for stream in info.get("streams", []):
+            if stream.get("codec_type") == "video":
+                r_frame_rate = stream.get("r_frame_rate")
+                avg_frame_rate = stream.get("avg_frame_rate")
+                if r_frame_rate and avg_frame_rate:
+                    return r_frame_rate == avg_frame_rate
+        return False
+    except Exception as e:
+        logger.warning(f"Failed to determine if {video_path} is CFR: {e}")
+        return False
+
 def get_video_duration(video_path: str) -> float:
     """Get duration of video in seconds."""
     try:
@@ -121,9 +136,9 @@ def run_ffmpeg_with_gpu_fallback(cmd: List[str]) -> subprocess.CompletedProcess:
             logger.error(f"FFmpeg command failed: {e.stderr.decode()}")
             raise e
 
-def transcode_to_cfr(input_path: str, output_path: str, fps: int = 30, crf: int = 18) -> bool:
-    """Re-encode a Variable Frame Rate (VFR) source to a strict Constant Frame Rate (CFR) H.264 file.
-    This must run before PySceneDetect and Whisper to prevent audio-to-video timestamp drift.
+def generate_proxy(input_path: str, output_path: str, fps: int = 30) -> bool:
+    """Generate a lightweight 360p proxy for AI analysis (scene detection, STT).
+    Also enforces CFR to prevent audio/video timestamp drift.
     """
     ffmpeg_cmd = get_ffmpeg_path()
     cmd = [
@@ -131,18 +146,18 @@ def transcode_to_cfr(input_path: str, output_path: str, fps: int = 30, crf: int 
         "-i", input_path,
         "-vsync", "cfr",
         "-r", str(fps),
-        "-c:v", "libx264",
-        "-crf", str(crf),
-        "-preset", "veryfast",  # Fast encode; quality is CRF-controlled not speed
+        "-vf", "scale=-1:360",  # Downscale to 360p for lightning-fast proxy generation
+        "-c:v", get_hw_encoder(),
+        "-b:v", "1M",           # Very low target bitrate
         "-c:a", "copy",         # Copy audio stream without re-encoding to preserve fidelity
         output_path
     ]
     try:
-        subprocess.run(cmd, check=True, capture_output=True)
-        logger.info(f"CFR transcode complete: {input_path} -> {output_path}")
+        run_ffmpeg_with_gpu_fallback(cmd)
+        logger.info(f"Proxy generation complete: {input_path} -> {output_path}")
         return True
-    except subprocess.CalledProcessError as e:
-        logger.error(f"CFR transcode failed for {input_path}: {e.stderr.decode()}")
+    except Exception as e:
+        logger.error(f"Proxy generation failed for {input_path}: {e}")
         return False
 
 def process_clip(video_path: str, start_sec: float, end_sec: float, output_path: str) -> bool:
@@ -404,16 +419,26 @@ def assemble_single_pass(edl, file_map, output_path, crossfade_duration=0.075):
     for i, item in enumerate(edl):
         s = item["start_sec"]
         e = item["end_sec"]
+        editorial_type = item.get("editorial_type", item.get("type", "KEEP"))
+        
         video_trim_parts.append(
             f"[{i}:v]trim=start={s:.6f}:end={e:.6f},"
             f"setpts=PTS-STARTPTS,{v_scale}[v{i}]"
         )
-        audio_trim_parts.append(
-            f"[{i}:a]atrim=start={s:.6f}:end={e:.6f},"
-            f"asetpts=PTS-STARTPTS,"
-            f"afade=t=in:st=0:d=0.02,afade=t=out:st={e-s-0.02:.6f}:d=0.02,"
-            f"dynaudnorm=p=0.9:m=100:s=5:g=15[a{i}]"
-        )
+        
+        if editorial_type == "KEEP":
+            audio_trim_parts.append(
+                f"[{i}:a]atrim=start={s:.6f}:end={e:.6f},"
+                f"asetpts=PTS-STARTPTS,"
+                f"dynaudnorm=p=0.9:m=100:s=5:g=15[a{i}]"
+            )
+        else:
+            audio_trim_parts.append(
+                f"[{i}:a]atrim=start={s:.6f}:end={e:.6f},"
+                f"asetpts=PTS-STARTPTS,"
+                f"afade=t=in:st=0:d=0.02,afade=t=out:st={e-s-0.02:.6f}:d=0.02,"
+                f"dynaudnorm=p=0.9:m=100:s=5:g=15[a{i}]"
+            )
 
     # Use a single concat filter for BOTH video and audio to maintain exact sync
     va_inputs = "".join(f"[v{i}][a{i}]" for i in range(n))

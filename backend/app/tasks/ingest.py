@@ -4,7 +4,7 @@ import logging
 from typing import List, Dict
 from app.utils.ffmpeg import (
     get_video_duration, extract_audio, extract_keyframe,
-    get_video_info, transcode_to_cfr
+    get_video_info
 )
 from app.models import VideoFileInfo, EGTSegment, generate_clip_id
 from app.tasks.scene_detect import detect_scenes
@@ -50,31 +50,29 @@ def ingest_video(video_path: str, job_dir: str) -> Dict:
     source_file_hash = _compute_file_hash(video_path)
 
     # Define paths
-    cfr_dir = os.path.join(job_dir, "cfr")
+    proxy_dir = os.path.join(job_dir, "proxy")
     audio_dir = os.path.join(job_dir, "audio")
     keyframes_dir = os.path.join(job_dir, "keyframes")
-    os.makedirs(cfr_dir, exist_ok=True)
+    os.makedirs(proxy_dir, exist_ok=True)
     os.makedirs(audio_dir, exist_ok=True)
     os.makedirs(keyframes_dir, exist_ok=True)
 
     # -----------------------------------------------------------------------
-    # Step 0: CFR Pre-transcoding
-    # Must run BEFORE PySceneDetect and Whisper to align audio/video timestamps.
+    # Step 0: Proxy Generation
+    # Generates a fast 360p proxy for PySceneDetect and STT extraction.
     # -----------------------------------------------------------------------
-    cfr_filename = f"{os.path.splitext(filename)[0]}_cfr.mp4"
-    cfr_path = os.path.join(cfr_dir, cfr_filename)
-    logger.info(f"Pre-transcoding to CFR 30fps: {video_path} -> {cfr_path}")
-    cfr_success = transcode_to_cfr(video_path, cfr_path)
+    from app.utils.ffmpeg import generate_proxy
+    proxy_filename = f"{os.path.splitext(filename)[0]}_proxy.mp4"
+    proxy_path = os.path.join(proxy_dir, proxy_filename)
+    logger.info(f"Generating lightweight proxy: {video_path} -> {proxy_path}")
+    proxy_success = generate_proxy(video_path, proxy_path)
 
-    # Use CFR output for all downstream processing; fall back to original on failure
-    active_video_path = cfr_path if cfr_success else video_path
-    if not cfr_success:
-        logger.warning(
-            f"CFR transcode failed for {filename}. "
-            "Continuing with original (VFR audio drift may occur)."
-        )
+    # Use proxy for downstream processing; fall back to original on failure
+    active_video_path = proxy_path if proxy_success else video_path
+    if not proxy_success:
+        logger.warning(f"Proxy generation failed for {filename}. Continuing with original.")
 
-    # Duration is read from the CFR-normalised file for accuracy
+    # Duration is read from the proxy file for accuracy
     duration = get_video_duration(active_video_path)
 
     # -----------------------------------------------------------------------

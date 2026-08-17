@@ -4,7 +4,7 @@ import logging
 import shutil
 from typing import List, Optional
 from datetime import datetime
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
@@ -12,7 +12,11 @@ load_dotenv()
 from app.config import settings
 import asyncio
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
 from app.models import JobStatus, VideoFileInfo, EDLEntry
+from app.db_models import VideoFile, Project
+from app.database import get_db
 from app.tasks.orchestrator import (
     jobs_db,
     jobs_data_db,
@@ -40,6 +44,11 @@ logger = logging.getLogger("VlogForge.API")
 
 app = FastAPI(title="VlogForge Backend API", version="2.0.0")
 
+from app.routers import auth, projects, upload
+app.include_router(auth.router)
+app.include_router(projects.router)
+app.include_router(upload.router)
+
 # CORS setup for local React + Vite development
 app.add_middleware(
     CORSMiddleware,
@@ -47,6 +56,18 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=[
+        "Upload-Offset", 
+        "Location", 
+        "Upload-Length", 
+        "Tus-Version", 
+        "Tus-Resumable", 
+        "Tus-Max-Size", 
+        "Tus-Extension", 
+        "Upload-Metadata", 
+        "Upload-Defer-Length", 
+        "Upload-Concat"
+    ],
 )
 
 @app.get("/")
@@ -55,57 +76,46 @@ def read_root():
 
 @app.post("/api/jobs", response_model=JobStatus)
 async def create_job(
-    files: List[UploadFile] = File(...),
+    project_id: str = Form(...),
     context_text: Optional[str] = Form(""),
     vlog_genre: Optional[str] = Form("default"),
     target_duration: Optional[float] = Form(10.0),
-    quality_threshold: Optional[float] = Form(0.35)
+    quality_threshold: Optional[float] = Form(0.35),
+    db: AsyncSession = Depends(get_db)
 ):
-    """Create a new editing job. Save uploaded raw videos and kick off background execution."""
-    job_id = str(uuid.uuid4())
-    logger.info(f"Creating job {job_id} with {len(files)} uploaded files, genre: {vlog_genre}...")
+    """Create a new editing job. Kicks off background execution using Tus-uploaded files."""
+    job_id = project_id # Use project_id as job_id for simplicity in M0
+    logger.info(f"Creating job {job_id} for project {project_id}, genre: {vlog_genre}...")
     interaction_logger.log_interaction("create_job", {
         "job_id": job_id,
-        "files_count": len(files),
+        "project_id": project_id,
         "vlog_genre": vlog_genre,
         "target_duration": target_duration,
         "quality_threshold": quality_threshold
     })
 
-    # Create job directories
-    job_raw_dir = os.path.join(settings.upload_dir, job_id, "raw")
-    os.makedirs(job_raw_dir, exist_ok=True)
+    # Fetch files from DB
+    result = await db.execute(select(VideoFile).where(VideoFile.project_id == project_id))
+    db_files = result.scalars().all()
 
+    if not db_files:
+        raise HTTPException(status_code=400, detail="No files uploaded for this project.")
+
+    unique_paths = set()
     saved_file_paths = []
     files_info = []
+    
+    for f in db_files:
+        if f.original_path not in unique_paths:
+            unique_paths.add(f.original_path)
+            saved_file_paths.append(f.original_path)
+            files_info.append(VideoFileInfo(
+                filename=f.filename,
+                original_path=f.original_path,
+                size_bytes=f.size_bytes
+            ))
 
-    for uploaded_file in files:
-        # Validate format
-        ext = os.path.splitext(uploaded_file.filename)[1].lower()
-        if ext not in [".mp4", ".mov", ".avi", ".mkv"]:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported file format: {uploaded_file.filename}. Please upload MP4, MOV, AVI or MKV."
-            )
-
-        saved_path = os.path.join(job_raw_dir, uploaded_file.filename)
-        try:
-            with open(saved_path, "wb") as buffer:
-                shutil.copyfileobj(uploaded_file.file, buffer)
-            saved_file_paths.append(saved_path)
-
-            # Record preliminary file details (duration calculated later in ingest stage)
-            file_info = VideoFileInfo(
-                filename=uploaded_file.filename,
-                original_path=saved_path,
-                size_bytes=os.path.getsize(saved_path)
-            )
-            files_info.append(file_info)
-        except Exception as e:
-            logger.error(f"Failed to save uploaded file {uploaded_file.filename}: {e}")
-            raise HTTPException(status_code=500, detail="Failed to save video uploads.")
-
-    # Create the initial job status in DB
+    # Create the initial job status in memory
     job_status = JobStatus(
         job_id=job_id,
         status="pending",
@@ -116,8 +126,22 @@ async def create_job(
         vlog_genre=vlog_genre,
         target_duration=target_duration,
         quality_threshold=quality_threshold,
-        created_at=datetime.utcnow()
+        created_at=datetime.utcnow(),
+        warnings=[]
     )
+    # Update Project in Postgres with settings and processing status
+    project_result = await db.execute(select(Project).where(Project.id == project_id))
+    project = project_result.scalars().first()
+    if project:
+        project.status = "processing"
+        project.settings = {
+            "context_text": context_text,
+            "vlog_genre": vlog_genre,
+            "target_duration": target_duration,
+            "quality_threshold": quality_threshold
+        }
+        await db.commit()
+
     jobs_db[job_id] = job_status
 
     # Start the async pipeline orchestrator
@@ -134,18 +158,24 @@ def get_job_status(job_id: str):
     return job
 
 @app.post("/api/jobs/{job_id}/cancel")
-def cancel_job_endpoint(job_id: str):
+async def cancel_job_endpoint(job_id: str, db: AsyncSession = Depends(get_db)):
     """Cancel a running editing job."""
     job = get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+    if job:
+        interaction_logger.log_interaction("cancel_job", {"job_id": job_id, "current_status": job.status})
+        if job.status in ["complete", "failed", "cancelled"]:
+            return {"status": job.status, "message": "Job cannot be cancelled in its current state."}
+        cancel_job(job_id)
 
-    interaction_logger.log_interaction("cancel_job", {"job_id": job_id, "current_status": job.status})
+    # Update DB regardless of whether it's in memory (e.g., if server restarted)
+    result = await db.execute(select(Project).where(Project.id == job_id))
+    project = result.scalars().first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
 
-    if job.status in ["complete", "failed", "cancelled"]:
-        return {"status": job.status, "message": "Job cannot be cancelled in its current state."}
+    project.status = "cancelled"
+    await db.commit()
 
-    cancel_job(job_id)
     return {"status": "cancelled", "message": "Cancellation request received."}
 
 @app.get("/api/jobs/{job_id}/transcript")

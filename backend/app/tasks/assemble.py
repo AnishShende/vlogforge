@@ -14,6 +14,7 @@ import os
 import shutil
 import logging
 from typing import List, Dict, Optional, Set
+import concurrent.futures
 
 from app.utils.ffmpeg import (
     process_clip,
@@ -88,11 +89,11 @@ def assemble_vlog(
             )
             return False
 
-    # Build file_map: filename -> cfr_path (preferred) or original_path
+    # Build file_map: filename -> original_path (preferred for assembly) or proxy_path
     file_map = {}
     for f in files_info:
         name = f["filename"]
-        file_map[name] = f.get("cfr_path") or f["original_path"]
+        file_map[name] = f.get("original_path") or f.get("cfr_path")
 
     # Normalize EDL to the format expected by FFmpeg utils
     # The new EDLEntry uses 'source_file', legacy uses 'video_file'
@@ -109,16 +110,23 @@ def assemble_vlog(
     # -----------------------------------------------------------------------
     # Primary Path: Single-pass filtergraph
     # -----------------------------------------------------------------------
-    logger.info("Attempting single-pass filtergraph assembly...")
-    success = assemble_single_pass(normalized_edl, file_map, final_output_path)
-    if success:
-        logger.info("Single-pass assembly succeeded.")
-        return True
+    if len(normalized_edl) <= 40:
+        logger.info("Attempting single-pass filtergraph assembly...")
+        success = assemble_single_pass(normalized_edl, file_map, final_output_path)
+        if success:
+            logger.info("Single-pass assembly succeeded.")
+            return True
 
-    logger.warning(
-        "Single-pass assembly failed. Falling back to multi-pass pipeline "
-        "(process_clip -> crossfade concat -> fade)."
-    )
+        logger.warning(
+            "Single-pass assembly failed. Falling back to multi-pass pipeline "
+            "(process_clip -> crossfade concat -> fade)."
+        )
+    else:
+        logger.info(
+            f"EDL contains {len(normalized_edl)} clips (>{40}). "
+            "Bypassing single-pass filtergraph to prevent resource exhaustion. "
+            "Routing directly to parallel multi-pass pipeline."
+        )
 
     # -----------------------------------------------------------------------
     # Fallback: Multi-pass pipeline
@@ -127,13 +135,14 @@ def assemble_vlog(
     os.makedirs(clips_dir, exist_ok=True)
     processed_clip_paths = []
 
-    for idx, item in enumerate(normalized_edl):
+    def _process_single_clip(args):
+        idx, item = args
         video_filename = item["video_file"]
         raw_video_path = file_map.get(video_filename)
 
         if not raw_video_path or not os.path.exists(raw_video_path):
             logger.error(f"Source video {video_filename} not found at {raw_video_path}.")
-            return False
+            return None
 
         start = item["start_sec"]
         end = item["end_sec"]
@@ -143,9 +152,24 @@ def assemble_vlog(
         logger.info(f"Processing clip {idx+1}/{len(normalized_edl)}: {clip_name} ({start:.2f}s to {end:.2f}s)...")
         if not process_clip(raw_video_path, start, end, clip_path):
             logger.error(f"Failed to slice clip {clip_name}.")
-            return False
+            return None
 
-        processed_clip_paths.append(clip_path)
+        return clip_path
+
+    # Process clips in parallel using ThreadPoolExecutor
+    max_workers = 4  # Safe limit for concurrent hardware encodes
+    logger.info(f"Rendering {len(normalized_edl)} clips in parallel (max_workers={max_workers})...")
+    
+    tasks = list(enumerate(normalized_edl))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        results = list(executor.map(_process_single_clip, tasks))
+    
+    # Filter out failures and keep order
+    for res in results:
+        if res:
+            processed_clip_paths.append(res)
+        else:
+            return False  # Abort if any clip failed
 
     if not processed_clip_paths:
         logger.error("No clips were successfully processed.")
