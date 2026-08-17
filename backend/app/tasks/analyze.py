@@ -1,7 +1,12 @@
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict
+
 from app.utils.llm import describe_keyframe, synthesize_context
+from app.utils.ffmpeg import extract_keyframe
 from app.models import EGTSegment
+from app.config import settings
 
 logger = logging.getLogger("VlogForge.Analyze")
 
@@ -10,9 +15,6 @@ logger = logging.getLogger("VlogForge.Analyze")
 CONTEXT_SAMPLE_COUNT = 10
 
 
-import os
-from app.utils.ffmpeg import extract_keyframe
-
 def analyze_segments(
     segments: List[EGTSegment],
     user_context: str,
@@ -20,73 +22,103 @@ def analyze_segments(
     files_info: List[Dict] = None
 ) -> Dict:
     """Run visual description for each EGT segment and generate a synthesized Context Document.
+
+    M4 Update: Keyframe extraction is done in parallel, but LLM calls are batched
+    across multiple segments (up to 30 keyframes per API call) to completely avoid
+    Gemini RPM rate limits and slash processing time.
     """
-    logger.info(f"Analyzing {len(segments)} segments...")
+    logger.info(f"Analyzing {len(segments)} segments (batched LLM)...")
 
     files_info = files_info or []
     cfr_lookup = {f.get("filename"): f.get("cfr_path") for f in files_info}
     keyframes_dir = os.path.join(job_dir, "keyframes") if job_dir else ""
 
-    # Step 1: Describe each segment's keyframe and extract tags
-    for seg in segments:
+    llm_items = []
+
+    def extract_for_segment(seg):
+        items = []
         duration = seg.end_sec - seg.start_sec
         
-        # Dense sampling for long scenes
-        if duration > 10.0 and job_dir and seg.source_file in cfr_lookup:
-            logger.info(f"Dense sampling for long segment ({duration:.1f}s): {seg.clip_id}")
+        # Dense multi-keyframe sampling for genuinely long segments only
+        if duration > settings.dense_sampling_floor_sec and job_dir and seg.source_file in cfr_lookup:
             cfr_path = cfr_lookup[seg.source_file]
-            
-            # Sample every 5 seconds, starting at 2.5s
-            timestamps = []
             t = seg.start_sec + 2.5
+            timestamps = []
             while t < seg.end_sec:
                 timestamps.append(t)
-                t += 5.0
-            
+                t += 15.0  # Increased stride to 15s to reduce keyframes
+                
             if not timestamps:
-                # Fallback to midpoint if duration math somehow fails
                 timestamps = [seg.start_sec + duration / 2.0]
                 
-            dense_paths = []
-            valid_t = []
             for t in timestamps:
                 kf_filename = f"{seg.clip_id}_dense_{t:.0f}.jpg"
                 kf_path = os.path.join(keyframes_dir, kf_filename)
                 
                 if extract_keyframe(cfr_path, t, kf_path):
-                    dense_paths.append(kf_path)
-                    valid_t.append(t)
                     seg.keyframe_paths.append(kf_path)
+                    items.append({
+                        "clip_id": f"{seg.clip_id}_dense_{t:.0f}",
+                        "path": kf_path,
+                        "seg_id": seg.clip_id,
+                        "time": t
+                    })
                 else:
                     logger.warning(f"Failed to extract dense keyframe at {t}s for {seg.clip_id}")
-            
-            if dense_paths:
-                from app.utils.llm import describe_keyframes_batch
-                batch_descs = describe_keyframes_batch(dense_paths, user_context)
-                
-                descriptions = []
-                for t, desc in zip(valid_t, batch_descs):
-                    rel_t = t - seg.start_sec
-                    descriptions.append(f"[{rel_t:.1f}s] {desc}")
-                    
-                description = " Timeline: " + " | ".join(descriptions)
-            else:
-                description = "Visual description unavailable."
         else:
-            # Standard single keyframe logic
             kf_path = seg.keyframe_path
             if kf_path:
-                logger.info(f"Analyzing keyframe: {kf_path}")
-                description = describe_keyframe(kf_path, user_context)
+                items.append({
+                    "clip_id": seg.clip_id,
+                    "path": kf_path,
+                    "seg_id": seg.clip_id,
+                    "time": None
+                })
+        return items
+
+    # Step 1: Parallel keyframe extraction
+    # Using more workers here since ffmpeg extraction is purely local and fast.
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = executor.map(extract_for_segment, segments)
+        for res in results:
+            llm_items.extend(res)
+
+    # Step 2: Batch LLM calls
+    from app.utils.llm import describe_keyframes_batch
+    batch_size = 30
+    descriptions_map = {}
+    
+    total_batches = max(1, (len(llm_items) + batch_size - 1) // batch_size)
+    for i in range(0, len(llm_items), batch_size):
+        batch = llm_items[i:i+batch_size]
+        batch_num = (i // batch_size) + 1
+        logger.info(f"Describing visual batch {batch_num}/{total_batches} ({len(batch)} keyframes)...")
+        batch_results = describe_keyframes_batch(batch, user_context)
+        descriptions_map.update(batch_results)
+
+    # Step 3: Re-assemble descriptions into segments
+    for seg in segments:
+        duration = seg.end_sec - seg.start_sec
+        if duration > settings.dense_sampling_floor_sec and job_dir and seg.source_file in cfr_lookup:
+            seg_descs = []
+            for item in llm_items:
+                if item["seg_id"] == seg.clip_id:
+                    desc = descriptions_map.get(item["clip_id"], "Visual description unavailable.")
+                    rel_t = item["time"] - seg.start_sec
+                    seg_descs.append(f"[{rel_t:.1f}s] {desc}")
+                    
+            if seg_descs:
+                seg.visual_description = "Timeline: " + " | ".join(seg_descs)
             else:
-                description = "Visual description unavailable."
+                seg.visual_description = "Visual description unavailable."
+        else:
+            seg.visual_description = descriptions_map.get(seg.clip_id, "Visual description unavailable.")
 
-        seg.visual_description = description
+    # Step 2: Extract tags from description (rule-based, no LLM)
+    for seg in segments:
+        seg.tags = _extract_tags_from_description(seg.visual_description, seg.transcript)
 
-        # Extract basic tags from description (lightweight — no LLM needed)
-        seg.tags = _extract_tags_from_description(description, seg.transcript)
-
-    # Step 2: Uniform strided sampling for context synthesis
+    # Step 3: Uniform strided sampling for context synthesis
     n = len(segments)
     if n <= CONTEXT_SAMPLE_COUNT:
         sampled_segments = segments
@@ -108,7 +140,7 @@ def analyze_segments(
     ]
     sampled_visuals = [s.visual_description for s in sampled_segments]
 
-    # Step 3: Synthesize overall context document from strided samples
+    # Step 4: Synthesize overall context document from strided samples
     logger.info("Synthesizing context document from strided segment samples...")
     context_summary = synthesize_context(sampled_transcripts, sampled_visuals, user_context)
 

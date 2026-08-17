@@ -169,9 +169,14 @@ class JobStatus(BaseModel):
     created_at: datetime
     completed_at: Optional[datetime] = None
     output_video_url: Optional[str] = None
+    warnings: List[str] = Field(default_factory=list)
+    # M4: Pipeline metrics for diagnostics — populated at pipeline completion
+    pipeline_metrics: Optional[Dict] = None  # keys: total_segments, chunks_used, raw_footage_sec, edl_path
+
 
 class WSProgressEvent(BaseModel):
     stage: str
     progress: int
     message: str
     download_url: Optional[str] = None
+    warnings: List[str] = Field(default_factory=list)

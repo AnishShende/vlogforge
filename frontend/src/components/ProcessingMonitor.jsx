@@ -68,39 +68,113 @@ export default function ProcessingMonitor({ jobId, onComplete, onFailed, onReset
       <div className="studio-canvas" style={{ flexDirection: 'column', gap: '2rem' }}>
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '2rem', maxWidth: '400px' }}>
           
-          {/* SVG Circular Progress Ring */}
-          <svg className="processing-ring-svg" width="180" height="180" viewBox="0 0 180 180">
-            <circle
-              cx="90" cy="90" r={radius}
-              fill="transparent"
-              stroke="var(--card-border)"
-              strokeWidth="7"
-            />
-            <circle
-              cx="90" cy="90" r={radius}
-              fill="transparent"
-              stroke="var(--primary)"
-              strokeWidth="7"
-              strokeDasharray={circumference}
-              strokeDashoffset={strokeDashoffset}
-              strokeLinecap="round"
-              style={{ transition: 'stroke-dashoffset 0.3s ease', filter: 'drop-shadow(0 0 8px var(--primary-glow))' }}
-              transform="rotate(-90 90 90)"
-            />
-            <text
-              x="90" y="96"
-              textAnchor="middle"
-              fill="var(--text-main)"
-              fontSize="1.75rem"
-              fontWeight="700"
-              fontFamily="Outfit, sans-serif"
-            >
-              {progress}%
-            </text>
-          </svg>
+          {/* Premium Circular Progress Animation */}
+          <div style={{ position: 'relative', width: '220px', height: '220px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            
+            {/* Dynamic Core Background Glow */}
+            <div style={{ 
+              position: 'absolute', inset: '10px', 
+              background: 'radial-gradient(circle, rgba(139, 92, 246, 0.15) 0%, transparent 60%)', 
+              borderRadius: '50%', 
+              animation: isRunning ? 'pulseGlow 3s infinite alternate ease-in-out' : 'none' 
+            }} />
+
+            <svg width="220" height="220" viewBox="0 0 220 220" style={{ position: 'absolute', zIndex: 2 }}>
+              <defs>
+                <linearGradient id="premium-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stopColor="var(--primary)" />
+                  <stop offset="50%" stopColor="#06B6D4" />
+                  <stop offset="100%" stopColor="#6D28D9" />
+                </linearGradient>
+                
+                {/* Extremely premium inner glow filter */}
+                <filter id="premium-glow" x="-20%" y="-20%" width="140%" height="140%">
+                  <feGaussianBlur stdDeviation="4" result="blur" />
+                  <feComposite in="SourceGraphic" in2="blur" operator="over" />
+                </filter>
+                <filter id="intense-glow" x="-50%" y="-50%" width="200%" height="200%">
+                  <feGaussianBlur stdDeviation="12" result="blur" />
+                  <feComposite in="SourceGraphic" in2="blur" operator="over" />
+                </filter>
+              </defs>
+
+              {/* Outer Slow Orbiting Dashed Ring */}
+              <circle
+                cx="110" cy="110" r="104"
+                fill="none" stroke="rgba(255, 255, 255, 0.04)"
+                strokeWidth="1.5" strokeDasharray="4 6"
+                style={{ animation: isRunning ? 'spin 20s linear infinite' : 'none', transformOrigin: '110px 110px' }}
+              />
+
+              {/* Inner Fast Orbiting Solid Accent Ring */}
+              <circle
+                cx="110" cy="110" r="72"
+                fill="none" stroke="rgba(139, 92, 246, 0.4)"
+                strokeWidth="1" strokeDasharray="120 40 40 40"
+                style={{ animation: isRunning ? 'spinCcw 10s linear infinite' : 'none', transformOrigin: '110px 110px' }}
+              />
+
+              {/* Main Background Track */}
+              <circle
+                cx="110" cy="110" r={radius}
+                fill="transparent"
+                stroke="rgba(255, 255, 255, 0.03)"
+                strokeWidth="8"
+              />
+
+              {/* Intense Glow Layer for the Progress */}
+              <circle
+                cx="110" cy="110" r={radius}
+                fill="transparent"
+                stroke="url(#premium-gradient)"
+                strokeWidth="8"
+                strokeDasharray={circumference}
+                strokeDashoffset={strokeDashoffset}
+                strokeLinecap="round"
+                filter="url(#intense-glow)"
+                style={{ 
+                  transition: 'stroke-dashoffset 0.8s cubic-bezier(0.16, 1, 0.3, 1)', 
+                  opacity: 0.6
+                }}
+                transform="rotate(-90 110 110)"
+              />
+
+              {/* Crisp Progress Stroke */}
+              <circle
+                cx="110" cy="110" r={radius}
+                fill="transparent"
+                stroke="url(#premium-gradient)"
+                strokeWidth="8"
+                strokeDasharray={circumference}
+                strokeDashoffset={strokeDashoffset}
+                strokeLinecap="round"
+                filter="url(#premium-glow)"
+                style={{ 
+                  transition: 'stroke-dashoffset 0.8s cubic-bezier(0.16, 1, 0.3, 1)',
+                }}
+                transform="rotate(-90 110 110)"
+              />
+            </svg>
+
+            {/* Center Text with Gradient Fill & Glow */}
+            <div style={{ position: 'relative', zIndex: 3, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+              <span style={{
+                fontSize: '2.5rem',
+                fontWeight: '800',
+                fontFamily: 'Outfit, sans-serif',
+                background: 'linear-gradient(135deg, #fff 0%, #e2e8f0 50%, #6D28D9 100%)',
+                WebkitBackgroundClip: 'text',
+                WebkitTextFillColor: 'transparent',
+                lineHeight: 1,
+                letterSpacing: '-0.02em'
+              }}>
+                {progress}%
+              </span>
+            </div>
+          </div>
           
           {/* Status text */}
-          <div style={{ textAlign: 'center' }}>
+          <div style={{ textAlign: 'center', height: '90px', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
             <div style={{ fontSize: '1.1rem', fontWeight: 600, color: 'var(--text-main)', marginBottom: '0.35rem', fontFamily: 'Outfit, sans-serif' }}>
               {currentStage === 'failed' ? 'Processing Failed' : message}
             </div>
@@ -127,8 +201,9 @@ export default function ProcessingMonitor({ jobId, onComplete, onFailed, onReset
                 cursor: 'pointer',
                 fontFamily: 'inherit',
                 transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
-                width: '100%',
-                justifyContent: 'center'
+                width: '280px',
+                justifyContent: 'center',
+                flexShrink: 0
               }}
               onMouseEnter={(e) => {
                 e.currentTarget.style.backgroundColor = 'rgba(239, 68, 68, 0.12)';

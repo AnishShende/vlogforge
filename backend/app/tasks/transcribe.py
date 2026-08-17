@@ -27,24 +27,24 @@ def get_whisper_model():
         try:
             from faster_whisper import WhisperModel
             import numpy as np
-            logger.info("Initializing faster-whisper Model (large-v3)...")
+            logger.info("Initializing faster-whisper Model (turbo)...")
             # Attempt to load on GPU first
             try:
-                logger.info("Trying to initialize Whisper automaticallys (CUDA/CPU)...")
-                model = WhisperModel("large-v3", device="auto", compute_type="default")
+                logger.info("Trying to initialize Whisper automatically (CUDA/CPU)...")
+                model = WhisperModel("turbo", device="auto", compute_type="default")
 
                 # Dry run to force-load libraries
                 logger.info("Performing dry-run to verify integrity...")
-                dummy_audio = np.zeros(16000, dtype=np.float32)  # 1 secosnd of silence
+                dummy_audio = np.zeros(16000, dtype=np.float32)  # 1 second of silence
                 list(model.transcribe(dummy_audio))
 
                 _whisper_model = model
                 logger.info("Whisper Model loaded successfully.")
             except Exception as auto_err:
                 logger.warning(f"Auto initialization or dry-run failed: {auto_err}. Falling back to CPU...")
-                # Fallback to CPU
-                _whisper_model = WhisperModel("medium", device="cpu", compute_type="int8")
-                logger.info("Whisper Model loaded successfully on CPU.")
+                # Fallback to CPU with a very fast model
+                _whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
+                logger.info("Whisper Model (base) loaded successfully on CPU.")
             return _whisper_model
         except Exception as e:
             logger.error(f"Failed to load faster-whisper: {e}. Transcription will run in Mock Mode.")
