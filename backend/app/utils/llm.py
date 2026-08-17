@@ -177,32 +177,41 @@ def describe_keyframe(image_path: str, context_notes: str = "", classify_content
         logger.error(f"Gemini multimodal keyframe description failed: {e}")
         return ("Visual description unavailable due to API error.", True) if classify_content else "Visual description unavailable due to API error."
 
-def describe_keyframes_batch(image_paths: List[str], context_notes: str = "") -> List[str]:
+def describe_keyframes_batch(items: List[Dict], context_notes: str = "") -> Dict[str, str]:
     """Describe a batch of keyframe images using Gemini Multimodal in a single API call."""
     if not init_gemini():
-        return [f"Mock visual: Visual scene from keyframe {os.path.basename(p)}." for p in image_paths]
+        return {item["clip_id"]: f"Mock visual: Visual scene from keyframe {os.path.basename(item['path'])}." for item in items}
     
-    if not image_paths:
-        return []
+    if not items:
+        return {}
         
     try:
         from google.genai import types
         import pydantic
         
         # Load all images
-        images = [Image.open(p) for p in image_paths]
+        images = [Image.open(item["path"]) for item in items]
         
         prompt = (
             f"I am providing {len(images)} keyframe images from a video vlog in chronological order. "
-            "Return a JSON list of strings, where each string is a concise (1-2 sentences) "
-            "description of the corresponding image. "
-            "Focus on subjects, lighting, actions, and visual interest.\n"
+            "For EACH image, provide a concise (1-2 sentences) description focusing on subjects, lighting, actions, and visual interest. "
+            "Return a JSON list of objects, where each object has exactly these keys:\n"
+            "- 'clip_id': The exact clip_id provided below.\n"
+            "- 'description': Your visual description of the image.\n\n"
+            "Here is the ordered list of clip_ids corresponding to the images:\n"
         )
-        if context_notes:
-            prompt += f"Context notes: {context_notes}\n"
+        for i, item in enumerate(items):
+            prompt += f"{i+1}. {item['clip_id']}\n"
             
+        if context_notes:
+            prompt += f"\nContext notes: {context_notes}\n"
+            
+        class KeyframeDescItem(pydantic.BaseModel):
+            clip_id: str
+            description: str
+
         class BatchDescSchema(pydantic.BaseModel):
-            descriptions: List[str]
+            descriptions: List[KeyframeDescItem]
             
         contents = [prompt] + images
         response = safe_generate_content(
@@ -217,15 +226,24 @@ def describe_keyframes_batch(image_paths: List[str], context_notes: str = "") ->
         data = json.loads(response.text.strip())
         descs = data.get("descriptions", [])
         
-        # Fallback if length doesn't match
-        if len(descs) != len(image_paths):
-            logger.warning(f"Batch description count mismatch: got {len(descs)}, expected {len(image_paths)}. Falling back to sequential.")
-            return [describe_keyframe(p, context_notes) for p in image_paths]
-            
-        return descs
+        result_map = {}
+        for d in descs:
+            if "clip_id" in d and "description" in d:
+                result_map[d["clip_id"]] = d["description"]
+                
+        # Fallback for any missing items
+        for item in items:
+            if item["clip_id"] not in result_map:
+                logger.warning(f"Batch description missed clip_id {item['clip_id']}. Falling back to sequential.")
+                result_map[item["clip_id"]] = describe_keyframe(item["path"], context_notes)
+                
+        return result_map
     except Exception as e:
         logger.error(f"Failed describe_keyframes_batch: {e}. Falling back to sequential.")
-        return [describe_keyframe(p, context_notes) for p in image_paths]
+        result_map = {}
+        for item in items:
+            result_map[item["clip_id"]] = describe_keyframe(item["path"], context_notes)
+        return result_map
 
 def synthesize_context(transcripts: List[Dict], visual_descriptions: List[str], user_context: str = "") -> str:
     """Summarize the transcripts, keyframes, and user context into a coherent topic/mood document."""
@@ -737,6 +755,146 @@ def classify_egt_segments(segments: List[Dict], context_doc: str, progress_callb
         return segments
 
 
+def classify_egt_segments_batch(
+    segments: List[Dict],
+    context_doc: str,
+    batch_size: Optional[int] = None,
+    progress_callback=None,
+) -> List[Dict]:
+    """M4 Batched Semantic Perception: classify EGT segments in sliding-window batches.
+
+    Instead of one Gemini call per segment (N calls), sends `batch_size` segments per
+    call (~N/batch_size total calls). Each batch includes the rolling 3-minute
+    transcript window as context so the model can correctly identify INTRO/OUTRO
+    based on chronological position.
+
+    Falls back transparently to the per-segment `classify_egt_segments()` for any batch
+    that produces a malformed response.
+    """
+    if not init_gemini():
+        return segments
+
+    if batch_size is None:
+        batch_size = settings.classification_batch_size
+
+    try:
+        from google.genai import types
+
+        class SegmentClassificationItem(pydantic.BaseModel):
+            clip_id: str = pydantic.Field(description="The clip_id of the segment being classified, copied verbatim from input")
+            segment_type: str = pydantic.Field(description="INTRO, OUTRO, SPEECH, B_ROLL, or SILENCE")
+            structural_cue: Optional[str] = pydantic.Field(
+                description="Narrative transition spoken by the subject, e.g. 'let\'s go outside', or null if none"
+            )
+
+        class BatchClassificationSchema(pydantic.BaseModel):
+            classifications: List[SegmentClassificationItem]
+
+        seg_by_id = {seg.get("clip_id", str(i)): seg for i, seg in enumerate(segments)}
+        total = len(segments)
+        processed = 0
+        progress_lock = threading.Lock()
+
+        def process_batch(batch_start, batch):
+            nonlocal processed
+            rolling = build_rolling_window_summary(segments, batch_start, window_sec=180.0)
+            batch_payload = [
+                {
+                    "clip_id": s.get("clip_id", ""),
+                    "transcript": s.get("transcript", ""),
+                    "visual_description": s.get("visual_description", ""),
+                    "start_sec": s.get("start_sec", 0),
+                    "end_sec": s.get("end_sec", 0),
+                }
+                for s in batch
+            ]
+            prompt = (
+                "You are an expert video editor classifying a batch of consecutive video segments.\n"
+                "For EACH segment below, return its clip_id exactly as given and classify segment_type "
+                "into ONE of: INTRO, OUTRO, SPEECH, B_ROLL, or SILENCE.\n"
+                "Also detect any structural_cue (narrative transition spoken by the subject) or return null.\n\n"
+                f"Global Context:\n{context_doc}\n\n"
+                f"Recent Transcript (rolling 3-min window before this batch):\n{rolling}\n\n"
+                f"Segments to classify ({len(batch)} total):\n{json.dumps(batch_payload, indent=2)}"
+            )
+            try:
+                response = safe_generate_content(
+                    model="gemini-flash-lite-latest",
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=BatchClassificationSchema,
+                        temperature=0.1,
+                    ),
+                )
+                data = json.loads(response.text.strip())
+                for item in data.get("classifications", []):
+                    clip_id = item.get("clip_id", "")
+                    if clip_id in seg_by_id:
+                        seg_by_id[clip_id]["segment_type"] = item.get("segment_type", "SPEECH")
+                        seg_by_id[clip_id]["structural_cue"] = item.get("structural_cue")
+                        seg_by_id[clip_id]["perception_model"] = "gemini-flash-lite-latest (batch)"
+                    else:
+                        logger.warning(f"Batch classification returned unknown clip_id: {clip_id!r}")
+                with progress_lock:
+                    processed += len(batch)
+                    if progress_callback:
+                        progress_callback(processed, total)
+            except Exception as batch_err:
+                logger.warning(
+                    f"Batch classification failed for batch starting at index {batch_start}: {batch_err}. "
+                    "Falling back to per-segment classification for this batch."
+                )
+                # Per-segment fallback for this batch only
+                for j, seg in enumerate(batch):
+                    rolling_fb = build_rolling_window_summary(segments, batch_start + j, window_sec=180.0)
+                    fallback_prompt = (
+                        "Classify this single video segment.\n"
+                        f"Global Context:\n{context_doc}\n\n"
+                        f"Rolling window:\n{rolling_fb}\n\n"
+                        f"Segment:\n{json.dumps({'transcript': seg.get('transcript', ''), 'visual_description': seg.get('visual_description', ''), 'start_sec': seg.get('start_sec', 0), 'end_sec': seg.get('end_sec', 0)})}"
+                    )
+                    try:
+                        class SegmentClassification(pydantic.BaseModel):
+                            segment_type: str
+                            structural_cue: Optional[str]
+
+                        resp = safe_generate_content(
+                            model="gemini-flash-lite-latest",
+                            contents=fallback_prompt,
+                            config=types.GenerateContentConfig(
+                                response_mime_type="application/json",
+                                response_schema=SegmentClassification,
+                                temperature=0.1,
+                            ),
+                        )
+                        fd = json.loads(resp.text.strip())
+                        seg["segment_type"] = fd.get("segment_type", "SPEECH")
+                        seg["structural_cue"] = fd.get("structural_cue")
+                        seg["perception_model"] = "gemini-flash-lite-latest (fallback)"
+                    except Exception as fb_err:
+                        logger.warning(f"Per-segment fallback also failed for {seg.get('clip_id')}: {fb_err}")
+                        seg["perception_model"] = "rule-based-v0"
+
+                with progress_lock:
+                    processed += len(batch)
+                    if progress_callback:
+                        progress_callback(processed, total)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            futures = []
+            for batch_start in range(0, total, batch_size):
+                batch = segments[batch_start : batch_start + batch_size]
+                futures.append(executor.submit(process_batch, batch_start, batch))
+            concurrent.futures.wait(futures)
+
+        return segments
+
+    except Exception as e:
+        logger.error(f"Batch semantic classification failed entirely: {e}")
+        return segments
+
+
 def generate_edl_llm(egt_json: Dict, target_duration: Optional[float] = None, user_prompt: str = "") -> Optional[List[Dict]]:
     """Phase 1 Reasoning: Generate a narrative, deduplicated EDL from the EGT."""
     if not init_gemini():
@@ -774,19 +932,50 @@ def generate_edl_llm(egt_json: Dict, target_duration: Optional[float] = None, us
             "5. NO SILENCE: Drop clips that are classified as SILENCE unless they are essential B-Roll.\n"
             "6. MICRO-TRIMMING & PADDING (CRITICAL): Set `core_start_sec` and `core_end_sec` to bound the strict essential payload of the clip (e.g., the exact words of a sentence, or the exact action). Set `start_sec` and `end_sec` wider to include breathing room (padding) around the core payload. If the visual timeline shows bad framing (e.g., subject walks out of frame) AND audio is feeble, aggressively cut BOTH the core bounds and the outer bounds to avoid that bad footage.\n"
             "7. NARRATIVE PRIORITY (CRITICAL): Assign `narrative_priority` to every clip:\n"
-            "   - `CRITICAL`: Explicit cues ('look at this'), mandatory narrative anchors, and INTRO/OUTRO. These can never be dropped.\n"
-            "   - `MEDIUM`: Standard speech or action that advances the storyline.\n"
+            "   - `CRITICAL`: Clips you explicitly reason about wanting to preserve for narrative flow, humor, emotional impact, or mandatory anchors (intros, outros, explicit cues like 'look at this'). These can NEVER be dropped by downstream systems.\n"
+            "   - `MEDIUM`: Standard speech or action that advances the storyline but could be trimmed if needed.\n"
             "   - `LOW`: Purely filler, B-roll, or highly redundant takes that can be safely dropped if the video budget is tight.\n"
+            "8. CRITICAL-TAGGING CONSISTENCY RULE: If your chain-of-thought reasoning mentions wanting to 'preserve', 'keep', 'retain', or 'not cut' a clip — for ANY reason (narrative flow, humor, emotional beat, important context) — you MUST tag that clip as CRITICAL, not MEDIUM. A clip described as important in your reasoning but tagged MEDIUM is a contradiction that WILL cause the clip to be deleted by downstream budget enforcement.\n"
         )
-        
+
+        # Inject budget constraint if target_duration is provided
+        if target_duration:
+            budget_tolerance = 0.10
+            min_budget = target_duration * (1.0 - budget_tolerance)
+            max_budget = target_duration * (1.0 + budget_tolerance)
+            
+            # Compute structural duration (intro/outro) from EGT
+            structural_dur = 0.0
+            for seg in egt_json.get("segments", []):
+                if seg.get("segment_type") in ["INTRO", "OUTRO"]:
+                    structural_dur += (seg.get("end_sec", 0) - seg.get("start_sec", 0))
+                    
+            main_content_budget = max(10.0, max_budget - structural_dur)
+            
+            prompt += (
+                f"9. DURATION BUDGET (HARD CONSTRAINT): Your final EDL MUST total between "
+                f"{min_budget:.0f}s and {max_budget:.0f}s. Based on the EGT, intros and outros "
+                f"total ~{structural_dur:.0f}s, leaving you with a maximum of ~{main_content_budget:.0f}s "
+                f"remaining for the MAIN content. Pace your story accordingly. Calculate the sum of "
+                f"(end_sec - start_sec) for every clip you include. If the total exceeds {max_budget:.0f}s, "
+                f"you MUST aggressively trim clips using core_start_sec/core_end_sec micro-trimming, or drop "
+                f"the least essential LOW/MEDIUM segments. Do NOT rely on downstream systems to fix budget "
+                f"overages — your EDL is the plan. Allocate intro and outro duration based purely on what the "
+                f"content warrants, not by fixed percentages.\n"
+            )
+            next_rule = 10
+        else:
+            next_rule = 9
+
         if user_prompt:
-            prompt += f"8. USER INSTRUCTION: '{user_prompt}'. Prioritize content that matches this instruction.\n"
+            prompt += f"{next_rule}. USER INSTRUCTION: '{user_prompt}'. Prioritize content that matches this instruction.\n"
 
         prompt += (
             f"\n=== EDITORIAL GROUND TRUTH (EGT) ===\n"
             f"{json.dumps(egt_json, indent=2)}\n\n"
             "Output the final EDL as a strictly validated JSON array according to the schema."
         )
+
 
         logger.info("Requesting Phase 1 Reasoning from gemini-2.5-flash...")
         response = safe_generate_content(
@@ -801,10 +990,83 @@ def generate_edl_llm(egt_json: Dict, target_duration: Optional[float] = None, us
         
         data = json.loads(response.text.strip())
         logger.info(f"Phase 1 Reasoning CoT: {data.get('chain_of_thought', '')}")
-        return data.get("edl", [])
+        return data
         
     except Exception as e:
         logger.error(f"Phase 1 Reasoning (generate_edl_llm) failed: {e}")
         return None
 
 
+def generate_edl_reduce_llm(
+    chunk_summaries: List[Dict],
+    target_duration: float,
+    context_doc: str = "",
+) -> Optional[List[Dict]]:
+    """M4 Map-Reduce EDL Reasoning — Reduce Phase.
+
+    Takes lightweight summaries of per-chunk EDLs produced by the Map phase and
+    uses Gemini 2.5 Flash to produce a globally coherent narrative ordering.
+
+    Each summary dict contains:
+        clip_id, source_file, start_sec, end_sec, duration_sec,
+        narrative_priority, editorial_type, transcript_snippet (first 80 chars)
+
+    Returns a list of dicts: {clip_id, sequence_index, narrative_priority},
+    which are used to re-order and override priorities on the merged EDL.
+    Returns None on failure (caller keeps original per-chunk ordering).
+    """
+    if not init_gemini():
+        return None
+
+    try:
+        from google.genai import types
+
+        class ReduceEntry(pydantic.BaseModel):
+            clip_id: str = pydantic.Field(description="clip_id from the input summaries, copied verbatim")
+            sequence_index: int = pydantic.Field(description="0-indexed final position in the assembled timeline")
+            narrative_priority: str = pydantic.Field(description="CRITICAL, MEDIUM, or LOW — override if needed")
+
+        class EDLReduceSchema(pydantic.BaseModel):
+            reasoning: str = pydantic.Field(
+                description="Brief reasoning for the global narrative ordering and any cross-chunk deduplication decisions"
+            )
+            ordered_edl: List[ReduceEntry]
+
+        prompt = (
+            f"You are the Director of 'VlogForge'. You have received {len(chunk_summaries)} pre-edited clips "
+            f"from a long raw vlog, each selected by a local editor from a 5-minute segment.\n"
+            f"Your job: arrange these {len(chunk_summaries)} clips into the best final narrative sequence "
+            f"for a vlog targeting a total duration of {target_duration:.0f} seconds.\n\n"
+            "INSTRUCTIONS:\n"
+            "1. Maintain broad chronological order unless a clip's transcript reveals an explicit reorder cue.\n"
+            "2. If two clips from different chunks contain near-identical transcript snippets, de-duplicate by "
+            "downgrading the earlier/weaker one to LOW priority.\n"
+            "3. Ensure the first clip has editorial_type INTRO and the last has OUTRO.\n"
+            "4. Assign sequence_index starting from 0 in your final output order.\n"
+            "5. Override narrative_priority to CRITICAL for the INTRO, OUTRO, and any clip that anchors a "
+            "scene transition. Override to LOW for obvious duplicates or filler.\n\n"
+            f"Global Context Document:\n{context_doc}\n\n"
+            f"Pre-edited clip summaries ({len(chunk_summaries)} clips):\n"
+            f"{json.dumps(chunk_summaries, indent=2)}\n\n"
+            "Output the final ordered_edl list with one entry per clip."
+        )
+
+        logger.info(
+            f"Map-Reduce Reduce Phase: sending {len(chunk_summaries)} clip summaries to {settings.reasoning_model}..."
+        )
+        response = safe_generate_content(
+            model=settings.reasoning_model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=EDLReduceSchema,
+                temperature=0.2,
+            ),
+        )
+        data = json.loads(response.text.strip())
+        logger.info(f"Reduce Phase reasoning: {data.get('reasoning', '')}")
+        return data.get("ordered_edl", [])
+
+    except Exception as e:
+        logger.error(f"Map-Reduce Reduce Phase (generate_edl_reduce_llm) failed: {e}")
+        return None

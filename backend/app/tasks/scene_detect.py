@@ -512,3 +512,194 @@ def subdivide_by_speech_gaps(
 
     return refined
 
+
+# ---------------------------------------------------------------------------
+# Pass 3b: Editorial subdivision for LLM Director granularity
+# ---------------------------------------------------------------------------
+
+def editorial_subdivide(
+    segments,
+    transcript_segments: List[Dict],
+    target_duration: float,
+    min_gap_sec: float = 1.0,
+) -> list:
+    """Subdivide long EGT segments at speech gaps for editorial granularity.
+
+    Unlike ``subdivide_by_speech_gaps`` (which only splits at "dead air" gaps
+    confirmed by vision), this function splits at **every** speech gap above
+    ``min_gap_sec`` — regardless of whether the gap contains meaningful visual
+    content.  The purpose is to produce atomic editorial units small enough for
+    the LLM Director to assign individual ``narrative_priority`` values to each
+    one, so Tier 3 repair can trim proportionally instead of dropping whole
+    monolithic blocks.
+
+    A maximum segment duration cap of ``max(30, target_duration * 0.15)`` is
+    enforced: any sub-segment that is still too long after speech-gap splitting
+    is recursively halved at its longest internal gap.
+
+    Args:
+        segments: List of EGTSegment objects (already refined by Pass 3).
+        transcript_segments: Raw transcript word-level dicts with
+            ``{video_file, start, end, text}`` keys.
+        target_duration: User-specified target video duration in seconds.
+        min_gap_sec: Minimum speech-gap duration to consider as a cut point.
+
+    Returns:
+        New list of EGTSegment objects with long segments subdivided.
+    """
+    from app.models import EGTSegment, generate_clip_id
+
+    max_segment_sec = max(30.0, target_duration * 0.15)
+    refined = []
+
+    for seg in segments:
+        duration = seg.end_sec - seg.start_sec
+        if duration <= max_segment_sec:
+            refined.append(seg)
+            continue
+
+        logger.info(
+            f"Editorial subdivide: Segment [{seg.start_sec:.1f}s - "
+            f"{seg.end_sec:.1f}s] ({duration:.1f}s) exceeds cap "
+            f"{max_segment_sec:.1f}s — finding speech-gap cut points"
+        )
+
+        # Collect speech words within this segment's time range
+        scene_words = [
+            t for t in transcript_segments
+            if t.get("video_file") == seg.source_file
+            and t.get("end", 0) > seg.start_sec
+            and t.get("start", 0) < seg.end_sec
+        ]
+        scene_words.sort(key=lambda w: w.get("start", 0))
+
+        if not scene_words:
+            refined.append(seg)
+            continue
+
+        # Build list of ALL speech gaps >= min_gap_sec
+        gaps = []
+
+        first_word_start = scene_words[0].get("start", seg.start_sec)
+        if first_word_start - seg.start_sec >= min_gap_sec:
+            gaps.append((seg.start_sec, first_word_start))
+
+        for i in range(len(scene_words) - 1):
+            current_end = scene_words[i].get("end", 0)
+            next_start = scene_words[i + 1].get("start", 0)
+            gap_duration = next_start - current_end
+            if gap_duration >= min_gap_sec:
+                gaps.append((current_end, next_start))
+
+        last_word_end = scene_words[-1].get("end", seg.end_sec)
+        if seg.end_sec - last_word_end >= min_gap_sec:
+            gaps.append((last_word_end, seg.end_sec))
+
+        if not gaps:
+            refined.append(seg)
+            logger.info(
+                f"Editorial subdivide: No speech gaps >= {min_gap_sec:.1f}s "
+                f"in [{seg.start_sec:.1f}s - {seg.end_sec:.1f}s]. "
+                "Keeping as single segment."
+            )
+            continue
+
+        # Greedily pick gap midpoints as split points, prioritizing the longest
+        # gaps first, until all resulting sub-segments are within the cap.
+        split_points = _pick_split_points(
+            seg.start_sec, seg.end_sec, gaps, max_segment_sec
+        )
+
+        if not split_points:
+            refined.append(seg)
+            continue
+
+        # Build sub-segments
+        split_points.sort()
+        boundaries = [seg.start_sec] + split_points + [seg.end_sec]
+
+        logger.info(
+            f"Editorial subdivide: Splitting [{seg.start_sec:.1f}s - "
+            f"{seg.end_sec:.1f}s] into {len(boundaries) - 1} sub-segment(s) "
+            f"at: {', '.join(f'{sp:.1f}s' for sp in split_points)}"
+        )
+
+        for i in range(len(boundaries) - 1):
+            sub_start = boundaries[i]
+            sub_end = boundaries[i + 1]
+            sub_duration = sub_end - sub_start
+
+            if sub_duration < 1.0:
+                continue
+
+            sub_clip_id = generate_clip_id(seg.source_file, sub_start, sub_end)
+
+            # Slice transcript for this sub-segment
+            sub_transcript_words = [
+                t.get("text", "")
+                for t in scene_words
+                if t.get("start", 0) >= sub_start - 0.5
+                and t.get("end", 0) <= sub_end + 0.5
+            ]
+            sub_transcript = " ".join(sub_transcript_words).strip()
+
+            sub_seg = EGTSegment(
+                clip_id=sub_clip_id,
+                source_file=seg.source_file,
+                source_file_hash=seg.source_file_hash,
+                start_sec=sub_start,
+                end_sec=sub_end,
+                keyframe_path=seg.keyframe_path,
+                keyframe_paths=list(seg.keyframe_paths),
+                transcript=sub_transcript,
+                visual_description=seg.visual_description,
+                tags=list(seg.tags) + ["editorial_split"],
+            )
+            refined.append(sub_seg)
+
+    # Log summary
+    if len(refined) != len(segments):
+        logger.info(
+            f"Editorial subdivide complete: {len(segments)} → "
+            f"{len(refined)} segments (cap={max_segment_sec:.1f}s)"
+        )
+    else:
+        logger.info("Editorial subdivide: No segments required subdivision.")
+
+    return refined
+
+
+def _pick_split_points(
+    seg_start: float,
+    seg_end: float,
+    gaps: List[tuple],
+    max_segment_sec: float,
+) -> List[float]:
+    """Greedily select gap midpoints as split points until all resulting
+    sub-segments are within ``max_segment_sec``.
+
+    Strategy: sort gaps by duration descending (longest gaps are the most
+    natural editorial cut points), then add the midpoint of each gap as a
+    split point if it would break an oversized sub-segment.  Stop when all
+    sub-segments are within the cap or we run out of gaps.
+    """
+    split_points: List[float] = []
+    sorted_gaps = sorted(gaps, key=lambda g: g[1] - g[0], reverse=True)
+
+    for gap_start, gap_end in sorted_gaps:
+        gap_mid = gap_start + (gap_end - gap_start) / 2.0
+
+        # Check if this gap_mid falls within a sub-segment that's too long
+        boundaries = sorted([seg_start] + split_points + [seg_end])
+        needs_split = False
+        for i in range(len(boundaries) - 1):
+            b_start = boundaries[i]
+            b_end = boundaries[i + 1]
+            if b_end - b_start > max_segment_sec and b_start < gap_mid < b_end:
+                needs_split = True
+                break
+
+        if needs_split:
+            split_points.append(gap_mid)
+
+    return split_points

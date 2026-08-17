@@ -26,10 +26,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Dict, List, Set, Optional
 from fastapi import WebSocket
+from sqlalchemy.future import select
 from app.config import settings
+from app.database import AsyncSessionLocal
+from app.db_models import Project
 from app.models import JobStatus, VideoFileInfo, WSProgressEvent, EGTSegment, EGTDocument
 from app.tasks.ingest import ingest_video
-from app.tasks.scene_detect import detect_scenes, subdivide_by_speech_gaps
+from app.tasks.scene_detect import detect_scenes, subdivide_by_speech_gaps, editorial_subdivide
 from app.tasks.transcribe import transcribe_audio, align_transcript_with_segments
 from app.tasks.analyze import analyze_segments
 from app.tasks.score import score_segments, recompute_bad_takes
@@ -74,17 +77,28 @@ def unregister_websocket(job_id: str, websocket: WebSocket):
 
 async def broadcast_progress(job_id: str, stage: str, progress: int, message: str, download_url: Optional[str] = None):
     """Update internal job state and broadcast update to connected WebSockets."""
+    warnings_list = []
     # Update JobStatus
-    if job_id in jobs_db:
+    if job_id in jobs_db and stage != "heartbeat":
         job = jobs_db[job_id]
         job.status = stage
         job.progress = progress
         job.message = message
+        warnings_list = job.warnings
         if stage == "complete" and download_url:
             job.output_video_url = download_url
             job.completed_at = datetime.utcnow()
         elif stage == "failed":
             job.completed_at = datetime.utcnow()
+
+    # Update Postgres database for terminal states
+    if stage in ["complete", "failed"]:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(select(Project).where(Project.id == job_id))
+            project = result.scalars().first()
+            if project:
+                project.status = stage
+                await session.commit()
 
     # Broadcast
     websockets = websockets_db.get(job_id, set())
@@ -93,7 +107,8 @@ async def broadcast_progress(job_id: str, stage: str, progress: int, message: st
             stage=stage,
             progress=progress,
             message=message,
-            download_url=download_url
+            download_url=download_url,
+            warnings=warnings_list
         )
         event_json = event.model_dump_json()
 
@@ -110,13 +125,8 @@ async def broadcast_progress(job_id: str, stage: str, progress: int, message: st
         for ws in disconnected_ws:
             websockets.discard(ws)
 
-def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, target_duration: float = 10.0, vlog_genre: str = "default", quality_threshold: float = 0.35):
+def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, target_duration: float = 10.0, vlog_genre: str = "default", quality_threshold: float = 0.35, main_loop: asyncio.AbstractEventLoop = None):
     """Synchronous pipeline run (to be run in a separate thread)."""
-
-
-    # Create event loop for this thread to call async broadcast function
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     # Lock to serialize WebSocket broadcasts from concurrent worker threads
     broadcast_lock = threading.Lock()
@@ -124,9 +134,10 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
     def safe_broadcast(stage: str, progress: int, message: str, download_url=None):
         """Thread-safe WebSocket progress broadcast wrapper."""
         with broadcast_lock:
-            loop.run_until_complete(
-                broadcast_progress(job_id, stage, progress, message, download_url)
-            )
+            if main_loop:
+                asyncio.run_coroutine_threadsafe(
+                    broadcast_progress(job_id, stage, progress, message, download_url), main_loop
+                ).result()
 
     job_dir = os.path.join(settings.upload_dir, job_id)
     os.makedirs(job_dir, exist_ok=True)
@@ -150,9 +161,10 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
                 break
             try:
                 with broadcast_lock:
-                    loop.run_until_complete(
-                        broadcast_progress(job_id, "heartbeat", -1, "ping")
-                    )
+                    if main_loop:
+                        asyncio.run_coroutine_threadsafe(
+                            broadcast_progress(job_id, "heartbeat", -1, "ping"), main_loop
+                        ).result()
             except Exception:
                 pass  # Ignore errors — websocket may have disconnected cleanly
 
@@ -297,6 +309,16 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
                     context_notes=context_text,
                 )
 
+        # ---- Stage 3a.5: Editorial subdivision for LLM Director ----
+        check_cancelled()
+        safe_broadcast("refining", 44, "Creating editorial sub-segments...")
+
+        all_segments = editorial_subdivide(
+            segments=all_segments,
+            transcript_segments=full_transcript_segments,
+            target_duration=target_duration,
+        )
+
         # ---- Stage 3b: Visual Analysis (Keyframe Description + Tags) ----
         check_cancelled()
         safe_broadcast("analyzing", 48, "Running visual keyframe analysis...")
@@ -314,9 +336,21 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
         check_cancelled()
         safe_broadcast("classifying", 55, "Classifying segments...")
 
+        # M4: Classify using batch path. Progress fires per-batch, so for 1000 segments
+        # at batch_size=10 this is 100 callbacks instead of 1000 — much less lock contention.
+        total_segs = len(all_segments)
+        batch_size = settings.classification_batch_size
+        total_batches = max(1, (total_segs + batch_size - 1) // batch_size)
+
         def scoring_progress(done: int, total: int):
-            pct = 55 + int(9 * done / total)  # 55% -> 64%
-            safe_broadcast("classifying", pct, f"Classifying segment {done}/{total}...")
+            # `done` and `total` here are segment counts (batch func fires per segment internally)
+            # We remap to 55–65% range, scaled dynamically on segment count.
+            pct = 55 + int(10 * done / max(1, total))
+            batch_num = max(1, (done + batch_size - 1) // batch_size)
+            safe_broadcast(
+                "classifying", pct,
+                f"Classifying segments: batch {batch_num}/{total_batches} ({done}/{total} segments)..."
+            )
 
         all_segments = score_segments(
             all_segments, total_raw_duration, context_summary, quality_threshold,
@@ -347,15 +381,25 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
 
         # ---- Stage 6: EDL Generation ----
         check_cancelled()
-        safe_broadcast("edl_generating", 75, "Generating Edit Decision List (chronological filter)...")
+        total_segs_for_edl = len(egt_doc.segments)
+        using_map_reduce = total_segs_for_edl > settings.edl_chunk_threshold
+        edl_stage_msg = (
+            f"Generating Edit Decision List (Map-Reduce: {total_segs_for_edl} segments, "
+            f"{max(1, (total_segs_for_edl + settings.edl_chunk_size - 1) // settings.edl_chunk_size)} chunks)..."
+            if using_map_reduce
+            else "Generating Edit Decision List (AI Reasoning)..."
+        )
+        safe_broadcast("edl_generating", 65, edl_stage_msg)
 
         edl, warning = generate_edl(egt_doc, full_transcript_segments, target_duration, context_text)
         jobs_data_db[job_id]["edl"] = edl
         if warning:
+            if job_id in jobs_db:
+                jobs_db[job_id].warnings.append(warning)
             if "warnings" not in jobs_data_db[job_id]:
                 jobs_data_db[job_id]["warnings"] = []
             jobs_data_db[job_id]["warnings"].append(warning)
-            # You could add safe_broadcast here if a "warning" event type existed on frontend
+            safe_broadcast("edl_generating", 65, "Generating Edit Decision List... (Warning occurred)")
 
         # Build set of valid clip_ids for assembly validation
         egt_clip_ids = {seg.clip_id for seg in all_segments}
@@ -387,14 +431,32 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
             except Exception as cleanup_err:
                 logger.warning(f"Failed to clean up CFR directory {cfr_dir}: {cleanup_err}")
 
-        # ---- Stage 8: Complete (Human Review happens in the frontend) ----
+        # ---- Stage 8: Complete ----
         download_url = f"/api/jobs/{job_id}/download"
-        loop.run_until_complete(broadcast_progress(
+
+        # M4: Record pipeline metrics for diagnostic reporting
+        if job_id in jobs_db:
+            chunks_used = max(1, (len(all_segments) + settings.edl_chunk_size - 1) // settings.edl_chunk_size)
+            jobs_db[job_id].pipeline_metrics = {
+                "total_segments": len(all_segments),
+                "raw_footage_sec": round(total_raw_duration, 1),
+                "edl_entries": len(edl),
+                "chunks_used": chunks_used if len(all_segments) > settings.edl_chunk_threshold else 1,
+                "map_reduce_active": len(all_segments) > settings.edl_chunk_threshold,
+            }
+            logger.info(
+                f"Pipeline metrics for job {job_id}: "
+                f"segments={len(all_segments)}, raw_footage={total_raw_duration:.0f}s, "
+                f"edl_entries={len(edl)}, map_reduce={'YES' if len(all_segments) > settings.edl_chunk_threshold else 'NO'}"
+            )
+
+        if main_loop:
+            asyncio.run_coroutine_threadsafe(broadcast_progress(
                 job_id, "complete", 100,
-                "Vlog creation successful! Your video is ready for review.",
+                "Editing complete! Final video is ready.",
                 download_url=download_url
-            ))
-        logger.info(f"Pipeline completed successfully for job: {job_id}")
+            ), main_loop).result()
+        
         interaction_logger.log_pipeline_completion(
             job_id,
             jobs_data_db.get(job_id, {}).get("egt", {}),
@@ -403,36 +465,36 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
 
     except Exception as e:
         logger.error(f"Pipeline failed for job {job_id}: {e}", exc_info=True)
-        if job_id in jobs_db and jobs_db[job_id].status == "cancelled":
-            loop.run_until_complete(broadcast_progress(
-                job_id, "cancelled", 0, "Job cancelled by user."
-            ))
-        else:
-            loop.run_until_complete(broadcast_progress(
-                job_id, "failed", 0, f"Error: {str(e)}"
-            ))
+        if main_loop:
+            if job_id in jobs_db and jobs_db[job_id].status == "cancelled":
+                asyncio.run_coroutine_threadsafe(broadcast_progress(
+                    job_id, "cancelled", 0, "Job cancelled by user."
+                ), main_loop).result()
+            else:
+                asyncio.run_coroutine_threadsafe(broadcast_progress(
+                    job_id, "failed", 0, f"Error: {str(e)}"
+                ), main_loop).result()
     finally:
         heartbeat_stop.set()
         logger.info(f"--- ENDING PIPELINE JOB: {job_id} ---")
         logging.getLogger().removeHandler(job_handler)
         job_handler.close()
-        loop.close()
 
 async def start_pipeline(job_id: str, video_paths: List[str], context_text: str, target_duration: float = 10.0, vlog_genre: str = "default", quality_threshold: float = 0.35):
     """Spawn the pipeline run in a background worker thread."""
+    main_loop = asyncio.get_running_loop()
     asyncio.create_task(
-        asyncio.to_thread(run_pipeline_sync, job_id, video_paths, context_text, target_duration, vlog_genre, quality_threshold)
+        asyncio.to_thread(run_pipeline_sync, job_id, video_paths, context_text, target_duration, vlog_genre, quality_threshold, main_loop)
     )
 
-def run_re_reasoning_sync(job_id: str, quality_threshold: float):
+def run_re_reasoning_sync(job_id: str, quality_threshold: float, main_loop: asyncio.AbstractEventLoop = None):
     """Re-run just the Reasoning (Pass 2) and Assembly (Pass 3) after threshold change."""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     broadcast_lock = threading.Lock()
 
     def safe_broadcast(stage: str, progress: int, message: str, download_url=None):
         with broadcast_lock:
-            loop.run_until_complete(broadcast_progress(job_id, stage, progress, message, download_url))
+            if main_loop:
+                asyncio.run_coroutine_threadsafe(broadcast_progress(job_id, stage, progress, message, download_url), main_loop).result()
 
     try:
         job = get_job(job_id)
@@ -456,7 +518,10 @@ def run_re_reasoning_sync(job_id: str, quality_threshold: float):
         safe_broadcast("edl_generating", 75, "Re-generating Edit Decision List (AI Reasoning)...")
 
         # 2. Re-run EDL generation
-        edl, warning = generate_edl(egt_doc, [], target_duration=None, user_prompt="")
+        # Pass through the original job's target_duration and context_text
+        job_target_duration = job.target_duration if job else None
+        job_context_text = job.context_text if job else ""
+        edl, warning = generate_edl(egt_doc, [], target_duration=job_target_duration, user_prompt=job_context_text)
         job_data["edl"] = edl
         if warning:
             if "warnings" not in job_data:
@@ -479,11 +544,12 @@ def run_re_reasoning_sync(job_id: str, quality_threshold: float):
             raise RuntimeError("FFmpeg assembly pipeline failed.")
 
         download_url = f"/api/jobs/{job_id}/download"
-        loop.run_until_complete(broadcast_progress(
-            job_id, "complete", 100,
-            "Re-reasoning successful! Vlog updated.",
-            download_url=download_url
-        ))
+        if main_loop:
+            asyncio.run_coroutine_threadsafe(broadcast_progress(
+                job_id, "complete", 100,
+                "Re-reasoning successful! Vlog updated.",
+                download_url=download_url
+            ), main_loop).result()
         logger.info(f"Re-reasoning completed successfully for job: {job_id}")
         interaction_logger.log_pipeline_completion(
             job_id,
@@ -493,13 +559,15 @@ def run_re_reasoning_sync(job_id: str, quality_threshold: float):
 
     except Exception as e:
         logger.error(f"Re-reasoning failed for job {job_id}: {e}", exc_info=True)
-        loop.run_until_complete(broadcast_progress(job_id, "failed", 0, f"Error: {str(e)}"))
+        if main_loop:
+            asyncio.run_coroutine_threadsafe(broadcast_progress(job_id, "failed", 0, f"Error: {str(e)}"), main_loop).result()
     finally:
-        loop.close()
+        pass
 
 async def start_re_reasoning(job_id: str, quality_threshold: float):
     """Spawn the re-reasoning in a background worker thread."""
+    main_loop = asyncio.get_running_loop()
     asyncio.create_task(
-        asyncio.to_thread(run_re_reasoning_sync, job_id, quality_threshold)
+        asyncio.to_thread(run_re_reasoning_sync, job_id, quality_threshold, main_loop)
     )
 

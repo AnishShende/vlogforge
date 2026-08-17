@@ -1,10 +1,16 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Film, Sparkles, Sliders, Clock, Loader2, Home, LayoutDashboard, Settings, Sun, Moon } from 'lucide-react';
+import { Film, Sparkles, Sliders, Clock, Loader2, Home, LayoutDashboard, Settings, Sun, Moon, Play, Share2, Download, XCircle } from 'lucide-react';
 import UploadPanel from './components/UploadPanel';
 import ProcessingMonitor from './components/ProcessingMonitor';
 import VideoPreview from './components/VideoPreview';
+import * as tus from 'tus-js-client';
+
+import Login from './components/auth/Login';
+import Register from './components/auth/Register';
+import Dashboard from './components/Dashboard';
 
 const CustomSelect = ({ value, onChange, options }) => {
+  // ... keeping CustomSelect as is ...
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef(null);
 
@@ -86,57 +92,216 @@ const CustomSelect = ({ value, onChange, options }) => {
 };
 
 export default function App() {
+  const [currentScreen, setCurrentScreen] = useState('loading'); // 'loading', 'login', 'register', 'dashboard', 'editor'
+  
+  // Editor state
   const [step, setStep] = useState(1);
   const [files, setFiles] = useState([]);
   const [contextText, setContextText] = useState('');
   const [jobId, setJobId] = useState(null);
   const [downloadUrl, setDownloadUrl] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [targetDuration, setTargetDuration] = useState(10.0);
+  const [targetDuration, setTargetDuration] = useState(600);
   const [vlogGenre, setVlogGenre] = useState('default');
   const [theme, setTheme] = useState('dark');
   const [qualityThreshold, setQualityThreshold] = useState(0.20); // Conservative default
+  const [projectName, setProjectName] = useState('Vlog Preview');
+  const [currentProjectId, setCurrentProjectId] = useState(null);
 
-  // Load theme from localStorage and apply to document
+  // Check auth on load
   useEffect(() => {
-    const savedTheme = localStorage.getItem('vlogforge-theme') || 'dark';
-    setTheme(savedTheme);
-    document.documentElement.setAttribute('data-theme', savedTheme);
+    const checkAuth = async () => {
+      const token = localStorage.getItem('vlogforge_token');
+      if (!token) {
+        setCurrentScreen('login');
+        return;
+      }
+      try {
+        const res = await fetch('/api/auth/me', {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (res.ok) {
+          setCurrentScreen('dashboard');
+        } else {
+          localStorage.removeItem('vlogforge_token');
+          setCurrentScreen('login');
+        }
+      } catch (err) {
+        console.error("Auth check failed:", err);
+        setCurrentScreen('login');
+      }
+    };
+    checkAuth();
   }, []);
 
-  const toggleTheme = () => {
-    const newTheme = theme === 'dark' ? 'light' : 'dark';
-    setTheme(newTheme);
-    document.documentElement.setAttribute('data-theme', newTheme);
-    localStorage.setItem('vlogforge-theme', newTheme);
+  const handleLogout = () => {
+    localStorage.removeItem('vlogforge_token');
+    setCurrentScreen('login');
+  };
+
+  const handleNewProject = async () => {
+    try {
+      const token = localStorage.getItem('vlogforge_token');
+      const res = await fetch('/api/projects/', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ title: 'New Vlog Project' })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setCurrentProjectId(data.id);
+        setProjectName(data.title);
+        resetEditorState();
+        setCurrentScreen('editor');
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleUpdateProjectName = async () => {
+    if (!currentProjectId) return;
+    try {
+      const token = localStorage.getItem('vlogforge_token');
+      await fetch(`/api/projects/${currentProjectId}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ title: projectName })
+      });
+    } catch (err) {
+      console.error("Failed to update project name", err);
+    }
+  };
+
+  const handleOpenProject = (project) => {
+    setCurrentProjectId(project.id);
+    setProjectName(project.title);
+    resetEditorState();
+
+    if (project.settings) {
+      setContextText(project.settings.context_text || '');
+      setTargetDuration(project.settings.target_duration || 600);
+      setVlogGenre(project.settings.vlog_genre || 'default');
+      setQualityThreshold(project.settings.quality_threshold || 0.20);
+    }
+
+    if (project.video_files && project.video_files.length > 0) {
+      setFiles(project.video_files.map(f => ({
+        id: f.id,
+        name: f.filename,
+        size: f.size_bytes,
+        _duration: f.duration || 0,
+        type: 'video/mp4',
+        uploadStatus: 'complete'
+      })));
+    }
+
+    const activeStages = ['processing', 'ingesting', 'transcribing', 'analyzing', 'classifying', 'edl_generating', 'assembling'];
+    if (activeStages.includes(project.status)) {
+      setJobId(project.id);
+      setStep(2); // Jump straight to ProcessingMonitor
+    } else if (project.status === 'complete') {
+      setJobId(project.id);
+      setStep(3); // Jump straight to Timeline Editor
+    }
+    
+    setCurrentScreen('editor');
+  };
+
+  const handleRemoveFile = async (file) => {
+    if (file.id && currentProjectId) {
+      try {
+        const token = localStorage.getItem('vlogforge_token');
+        await fetch(`/api/projects/${currentProjectId}/files/${file.id}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${token}` }
+        });
+      } catch (err) {
+        console.error('Error removing file:', err);
+      }
+    }
+  };
+
+  const resetEditorState = () => {
+    setStep(1);
+    setFiles([]);
+    setContextText('');
+    setJobId(null);
+    setDownloadUrl(null);
+    setTargetDuration(10.0);
+    setVlogGenre('default');
+    setQualityThreshold(0.20);
   };
 
   const handleSubmit = async () => {
     setIsSubmitting(true);
-    const formData = new FormData();
     
-    // Sort files chronologically based on their last modification time
-    // This ensures that footage from cameras is processed in the correct order,
-    // fixing issues where alphabetical sorting misplaced intros/outros.
-    const sortedFiles = [...files].sort((a, b) => a.lastModified - b.lastModified);
-
-    sortedFiles.forEach((file) => {
-      formData.append('files', file);
-    });
-    formData.append('context_text', contextText);
-    formData.append('vlog_genre', vlogGenre);
-    formData.append('target_duration', targetDuration);
-    formData.append('quality_threshold', qualityThreshold);
-
     try {
+      const token = localStorage.getItem('vlogforge_token');
+      const sortedFiles = [...files].sort((a, b) => a.lastModified - b.lastModified);
+
+      // 1. Upload files via Tus
+      for (const file of sortedFiles) {
+        // Skip files that were restored from the database and are already uploaded
+        if (!(file instanceof File) || file.uploadStatus === 'complete') {
+          continue;
+        }
+
+        await new Promise((resolve, reject) => {
+          const upload = new tus.Upload(file, {
+            endpoint: "/api/upload/tus",
+            chunkSize: 10 * 1024 * 1024, // 10MB chunks to prevent Vite proxy OOM crashes
+            retryDelays: [0, 3000, 5000, 10000, 20000],
+            metadata: {
+              filename: unescape(encodeURIComponent(file.name)),
+              filetype: file.type,
+              project_id: currentProjectId
+            },
+            headers: {
+              Authorization: `Bearer ${token}`
+            },
+            onError: (error) => {
+              console.error("Failed because: " + error);
+              reject(error);
+            },
+            onProgress: (bytesUploaded, bytesTotal) => {
+              const percentage = ((bytesUploaded / bytesTotal) * 100).toFixed(2);
+              console.log(file.name, percentage + "%");
+            },
+            onSuccess: () => {
+              console.log("Download %s from %s", upload.file.name, upload.url);
+              resolve();
+            }
+          });
+          upload.start();
+        });
+      }
+
+      // 2. Start Processing Job
+      const formData = new FormData();
+      formData.append('project_id', currentProjectId);
+      formData.append('context_text', contextText);
+      formData.append('vlog_genre', vlogGenre);
+      formData.append('target_duration', targetDuration);
+      formData.append('quality_threshold', qualityThreshold);
+
       const response = await fetch('/api/jobs', {
         method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        },
         body: formData,
       });
 
       if (!response.ok) {
         const errData = await response.json();
-        throw new Error(errData.detail || 'Upload failed');
+        throw new Error(errData.detail || 'Processing start failed');
       }
 
       const data = await response.json();
@@ -187,53 +352,101 @@ export default function App() {
     setDownloadUrl(null);
   };
 
+  if (currentScreen === 'loading') {
+    return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', background: 'var(--bg-main)', color: 'var(--primary)' }}><Loader2 className="spinner" size={32} /></div>;
+  }
+
+  if (currentScreen === 'login') {
+    return <Login onLogin={() => setCurrentScreen('dashboard')} onNavigateRegister={() => setCurrentScreen('register')} />;
+  }
+
+  if (currentScreen === 'register') {
+    return <Register onRegister={() => setCurrentScreen('dashboard')} onNavigateLogin={() => setCurrentScreen('login')} />;
+  }
+
+  if (currentScreen === 'dashboard') {
+    return <Dashboard onNewProject={handleNewProject} onOpenProject={handleOpenProject} onLogout={handleLogout} />;
+  }
+
+  // currentScreen === 'editor'
   return (
     <div className="dashboard-layout">
       <div className="dashboard-main">
         {/* Top Header */}
-        <header className="dashboard-header">
-          <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-             <Film size={24} style={{ color: 'var(--primary)', filter: 'drop-shadow(0 0 4px var(--primary-glow))' }} />
-             <h1 style={{ margin: 0, fontSize: '1.25rem', fontFamily: 'Outfit, sans-serif' }}>VlogForge Studio</h1>
-             <div style={{ width: '1px', height: '24px', background: 'var(--card-border)' }} />
-             
-             {/* Step indicators */}
-             <div style={{ display: 'flex', alignItems: 'center', gap: '2rem', fontSize: '0.8rem', userSelect: 'none' }}>
-              {[
-                { num: 1, label: 'Setup' },
-                { num: 2, label: 'Processing' },
-                { num: 3, label: 'Studio' },
-              ].map((s) => (
-                <div key={s.num} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: step === s.num ? 'var(--primary)' : 'var(--text-disabled)', boxShadow: step === s.num ? '0 0 6px var(--primary)' : 'none', transition: 'all 0.4s ease' }} />
-                  <span style={{ color: step === s.num ? 'var(--text-main)' : 'var(--text-muted)', fontWeight: step === s.num ? 600 : 400, transition: 'all 0.4s ease' }}>{s.num}. {s.label}</span>
-                </div>
-              ))}
+        <header className="dashboard-header" style={{ padding: '0 1.5rem', height: '64px', borderBottom: '1px solid var(--card-border)' }}>
+          {/* Left: Logo/Icon and Back */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', width: '300px' }}>
+            <button onClick={() => setCurrentScreen('dashboard')} className="btn btn-primary" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.6rem 1.2rem', background: 'linear-gradient(135deg, var(--primary) 0%, #a855f7 100%)', border: 'none', color: 'white', fontWeight: 700, letterSpacing: '0.05em' }}>
+              <Home size={18} /> Dashboard
+            </button>
+          </div>
+          
+          {/* Center: Title Pill (Editable) */}
+          <div style={{ flex: 1, display: 'flex', justifyContent: 'center' }}>
+            <div style={{ 
+              background: 'var(--tab-group-bg)', 
+              border: '1px solid var(--card-border)',
+              borderRadius: '99px',
+              padding: '0.4rem 1rem',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.75rem',
+              fontSize: '0.8rem',
+              transition: 'border-color 0.2s ease'
+            }}
+            onFocus={(e) => e.currentTarget.style.borderColor = 'var(--primary)'}
+            onBlur={(e) => e.currentTarget.style.borderColor = 'var(--card-border)'}
+            >
+              <input 
+                value={projectName}
+                onChange={(e) => setProjectName(e.target.value)}
+                onBlur={handleUpdateProjectName}
+                style={{ 
+                  background: 'transparent', border: 'none', outline: 'none', 
+                  color: 'var(--text-main)', fontWeight: 500, width: `${Math.max(4, projectName.length)}ch`,
+                  fontFamily: 'inherit', fontSize: '0.8rem', textAlign: 'center', minWidth: '50px'
+                }} 
+              />
+              <span style={{ color: 'var(--text-muted)' }}>|</span>
+              <span style={{ color: 'var(--text-disabled)' }}>{step === 3 ? 'AI Assembled' : step === 2 ? 'Processing' : 'Setup'}</span>
             </div>
           </div>
           
-          {/* Theme Switcher Button */}
-          <button 
-            onClick={toggleTheme}
-            style={{
-              background: 'transparent',
-              border: 'none',
-              cursor: 'pointer',
-              color: 'var(--text-muted)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              width: '40px',
-              height: '40px',
-              borderRadius: 'var(--radius-md)',
-              transition: 'var(--transition)'
-            }}
-            onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(139, 92, 246, 0.1)'}
-            onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
-            title="Toggle Theme"
-          >
-            {theme === 'dark' ? <Sun size={20} /> : <Moon size={20} />}
-          </button>
+          {/* Right: Actions */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', width: '300px', justifyContent: 'flex-end' }}>
+            {step === 3 && (
+              <button 
+                className="btn-primary" 
+                onClick={() => {
+                  if (downloadUrl) {
+                    window.open(downloadUrl, '_blank');
+                  } else {
+                    alert('Download URL not ready yet.');
+                  }
+                }}
+                style={{ 
+                  padding: '0.6rem 1.2rem', 
+                  borderRadius: '6px', 
+                  fontSize: '0.75rem', 
+                  display: 'flex', 
+                  alignItems: 'center', 
+                  gap: '0.5rem',
+                  background: 'linear-gradient(135deg, var(--primary) 0%, #a855f7 100%)',
+                  boxShadow: '0 4px 15px rgba(139, 92, 246, 0.4)',
+                  border: 'none',
+                  color: 'white',
+                  fontWeight: 700,
+                  letterSpacing: '0.05em',
+                  transition: 'all 0.2s ease',
+                  cursor: 'pointer'
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-1px)'; e.currentTarget.style.boxShadow = '0 6px 20px rgba(139, 92, 246, 0.6)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.transform = 'translateY(0)'; e.currentTarget.style.boxShadow = '0 4px 15px rgba(139, 92, 246, 0.4)'; }}
+              >
+                <Download size={14} /> EXPORT
+              </button>
+            )}
+          </div>
         </header>
 
         <main className="dashboard-content">
@@ -291,11 +504,11 @@ export default function App() {
                     value={targetDuration}
                     onChange={setTargetDuration}
                     options={[
-                      { value: 1, label: '1 Min (Short Reel)' },
-                      { value: 3, label: '3 Mins (Compact)' },
-                      { value: 5, label: '5 Mins (Standard)' },
-                      { value: 10, label: '10 Mins (Extended - Default)' },
-                      { value: 15, label: '15 Mins (Documentary)' },
+                      { value: 60, label: '1 Min (Short Reel)' },
+                      { value: 180, label: '3 Mins (Compact)' },
+                      { value: 300, label: '5 Mins (Standard)' },
+                      { value: 600, label: '10 Mins (Extended - Default)' },
+                      { value: 900, label: '15 Mins (Documentary)' },
                       { value: 0, label: 'Auto (30% raw length)' }
                     ]}
                   />
@@ -387,6 +600,7 @@ export default function App() {
               files={files} 
               setFiles={setFiles} 
               isSubmitting={isSubmitting}
+              onRemoveFile={handleRemoveFile}
             />
           </div>
 

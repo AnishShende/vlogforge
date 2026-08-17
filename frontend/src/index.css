@@ -1,24 +1,28 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Outfit:wght@400;500;600;700;800&display=swap');
 
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
 :root {
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
   line-height: 1.5;
   font-weight: 400;
 
   color-scheme: dark;
-  --bg-color: #09090B;
-  --bg-grid: rgba(99, 102, 241, 0.02);
-  --card-bg: #18181B;
-  --card-border: #27272A;
-  --card-border-glow: rgba(124, 58, 237, 0.3);
+  --bg-color: #1A1A1A;
+  --bg-grid: rgba(109, 40, 217, 0.02);
+  --card-bg: #222222;
+  --card-border: #333333;
+  --card-border-glow: rgba(109, 40, 217, 0.3);
   
-  --primary: #7C3AED;
-  --primary-glow: rgba(124, 58, 237, 0.4);
+  --primary: #6D28D9;
+  --primary-glow: rgba(109, 40, 217, 0.4);
   --secondary: #06B6D4;
   --secondary-glow: rgba(6, 182, 212, 0.4);
-  --accent: #EC4899;
+  --accent: #6D28D9;
 
-  --text-main: #FAFAFA;
+  --text-main: #FFFFFF;
   --text-muted: #A1A1AA;
   --text-disabled: #52525B;
 
@@ -27,18 +31,18 @@
   --danger: #EF4444;
   
   --radius-lg: 16px;
-  --radius-md: 12px;
-  --radius-sm: 8px;
+  --radius-md: 8px;
+  --radius-sm: 4px;
 
   --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
   --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 
   /* Layout Theme Variables */
-  --sidebar-bg: #18181B;
-  --header-bg: rgba(9, 9, 11, 0.85);
-  --tab-group-bg: #09090B;
-  --btn-disabled-bg: var(--text-disabled);
-  --btn-disabled-color: var(--text-muted);
+  --sidebar-bg: #1F1F1F;
+  --header-bg: #1A1A1A;
+  --tab-group-bg: #141414;
+  --btn-disabled-bg: #333333;
+  --btn-disabled-color: #777777;
 }
 
 [data-theme="light"] {
@@ -54,6 +58,7 @@ body {
     radial-gradient(circle at 15% 50%, rgba(124, 58, 237, 0.08), transparent 25%),
     radial-gradient(circle at 85% 30%, rgba(6, 182, 212, 0.08), transparent 25%);
   color: var(--text-main);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
   overflow-x: hidden;
   -webkit-font-smoothing: antialiased;
 }
@@ -124,6 +129,11 @@ body {
 @keyframes spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
+}
+
+@keyframes spinCcw {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(-360deg); }
 }
 
 /* Viewfinder corner pulse */
@@ -399,7 +409,7 @@ p.subtitle {
   justify-content: center;
   gap: 0.5rem;
   padding: 0.75rem 1.5rem;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   font-weight: 500;
   font-size: 0.9rem;
   cursor: pointer;
@@ -411,15 +421,16 @@ p.subtitle {
 
 .btn-primary {
   background: var(--primary);
-  color: #FAFAFA;
+  color: #111111;
+  font-weight: 700;
   box-shadow: 0 2px 10px var(--primary-glow);
 }
 
 .btn-primary:hover:not(:disabled) {
-  background: #8b5cf6;
-  border-color: rgba(255, 255, 255, 0.1);
+  background: #8B5CF6;
+  border-color: transparent;
   transform: translateY(-1px);
-  box-shadow: 0 4px 15px rgba(124, 58, 237, 0.5);
+  box-shadow: 0 4px 15px rgba(109, 40, 217, 0.5);
 }
 
 .btn-primary:active:not(:disabled) {
@@ -486,7 +497,7 @@ textarea.input-field {
 .input-field:focus {
   outline: none;
   border-color: var(--primary);
-  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.1), 0 0 10px var(--primary-glow);
+  box-shadow: 0 0 0 3px rgba(109, 40, 217, 0.1), 0 0 10px var(--primary-glow);
 }
 
 textarea.input-field::placeholder {

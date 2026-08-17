@@ -19,3 +19,11 @@ dependencies:
       - scenedetect[opencv]
       - opencv-python-headless
       - pytest
+      # M0 Dependencies
+      - sqlalchemy
+      - alembic
+      - asyncpg
+      - psycopg2-binary
+      - passlib[bcrypt]
+      - python-jose[cryptography]
+

@@ -19,7 +19,7 @@ function getVideoDuration(file) {
   });
 }
 
-export default function UploadPanel({ files, setFiles, isSubmitting }) {
+export default function UploadPanel({ files, setFiles, isSubmitting, onRemoveFile }) {
   const [durations, setDurations] = useState({}); // { fileName_size: durationInSecs }
 
   // Recalculate durations if files exist but durations state is empty (e.g., when returning from Step 2)
@@ -73,6 +73,9 @@ export default function UploadPanel({ files, setFiles, isSubmitting }) {
 
   const removeFile = (index) => {
     const file = files[index];
+    if (onRemoveFile) {
+      onRemoveFile(file);
+    }
     const key = `${file.name}_${file.size}`;
     setDurations((prev) => {
       const next = { ...prev };
@@ -192,52 +195,6 @@ export default function UploadPanel({ files, setFiles, isSubmitting }) {
         </>
       )}
 
-      {/* Hoverable Inspector */}
-      <div className="inspector-hover-trigger" style={{ marginTop: 'auto', alignSelf: 'flex-end', position: 'relative' }}>
-        <div style={{ 
-          display: 'flex', alignItems: 'center', gap: '0.4rem', 
-          fontSize: '0.7rem', color: 'var(--text-disabled)', cursor: 'default',
-          padding: '0.5rem 0.65rem', borderRadius: 'var(--radius-sm)',
-          border: '1px solid transparent',
-          transition: 'all 0.3s ease'
-        }}>
-          <Info size={12} />
-          <span>Session Info</span>
-        </div>
-        <div className="inspector-hover-card">
-          <div className="inspector-hover-card-inner">
-            <div style={{ fontSize: '0.65rem', textTransform: 'uppercase', fontWeight: 700, color: 'var(--text-main)', marginBottom: '0.65rem', letterSpacing: '0.05em' }}>Inspector</div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', fontSize: '0.7rem' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: 'var(--text-muted)' }}>Encoder</span>
-                <span style={{ color: 'var(--success)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
-                  <span style={{ width: '4px', height: '4px', borderRadius: '50%', background: 'var(--success)' }} />
-                  NVENC H.264
-                </span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid var(--card-border)', paddingTop: '0.4rem' }}>
-                <span style={{ color: 'var(--text-muted)' }}>ASR</span>
-                <span style={{ color: 'var(--success)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
-                  <span style={{ width: '4px', height: '4px', borderRadius: '50%', background: 'var(--success)' }} />
-                  Whisper CUDA
-                </span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid var(--card-border)', paddingTop: '0.4rem' }}>
-                <span style={{ color: 'var(--text-muted)' }}>LLM</span>
-                <span style={{ color: 'var(--secondary)', fontWeight: 600 }}>Gemini 2.5 Flash</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid var(--card-border)', paddingTop: '0.4rem' }}>
-                <span style={{ color: 'var(--text-muted)' }}>Loudness</span>
-                <span>-14 LUFS</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid var(--card-border)', paddingTop: '0.4rem' }}>
-                <span style={{ color: 'var(--text-muted)' }}>Crossfade</span>
-                <span>0.5s</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
     </div>
   );
 }

@@ -9,6 +9,11 @@ class Settings(BaseSettings):
     output_dir: str = "d:/VlogForge/outputs"
     log_dir: str = "d:/VlogForge/logs"
 
+    # M0 Auth settings
+    jwt_secret_key: str = "your-super-secret-jwt-key-replace-in-prod"
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = 60 * 24 * 7  # 7 days
+
     # Phase 0: Quality scoring
     quality_threshold: float = 0.35     # Absolute bad-take threshold (0–1). Conservative default.
 
@@ -27,6 +32,16 @@ class Settings(BaseSettings):
     # Model tiering
     perception_model: str = "gemini-2.0-flash-lite"   # Cheap model for Pass 1 classification
     reasoning_model: str = "gemini-2.5-flash"         # Frontier model for Pass 2 reasoning (Phase 1+)
+
+    # M4: Long-Footage Scaling — controls for batch/chunk processing
+    # Classification (Workstream 1)
+    classification_batch_size: int = 30   # EGT segments per batched Gemini classification call
+    # Visual analysis (Workstream 2)
+    visual_analysis_workers: int = 4      # Concurrent ThreadPoolExecutor threads for keyframe description
+    dense_sampling_floor_sec: float = 30.0  # Segments shorter than this skip dense multi-keyframe sampling
+    # EDL Map-Reduce reasoning (Workstream 3)
+    edl_chunk_size: int = 35             # Max EGT segments per Map-phase chunk
+    edl_chunk_threshold: int = 50        # Activate Map-Reduce when total segments exceed this
 
     model_config = SettingsConfigDict(
         env_file=os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".env"),

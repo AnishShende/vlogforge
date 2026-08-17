@@ -59,6 +59,7 @@ export default function VideoPreview({ jobId, downloadUrl, onReset, onReEdit }) 
   const pendingSeekRef = useRef(null);
 
   const [selectedSegment, setSelectedSegment] = useState(null);
+  const [warnings, setWarnings] = useState([]);
 
   // Quality Threshold Calibration
   const [localQualityThreshold, setLocalQualityThreshold] = useState(0.35);
@@ -156,6 +157,9 @@ export default function VideoPreview({ jobId, downloadUrl, onReset, onReEdit }) 
         if (data.quality_threshold !== undefined) {
           setLocalQualityThreshold(data.quality_threshold);
         }
+        if (data.warnings) {
+          setWarnings(data.warnings);
+        }
       })
       .catch((err) => console.error(err));
   }, [jobId]);
@@ -166,7 +170,11 @@ export default function VideoPreview({ jobId, downloadUrl, onReset, onReEdit }) 
     const startInFinal = cumulativeOffset;
     const dur = item.end_sec - item.start_sec;
     cumulativeOffset += dur;
-    return { ...item, startInFinal, duration: dur };
+    
+    const match = transcript.find((t) => segmentsMatch(item, t));
+    const transcriptText = match ? (match.transcript || match.text || '') : '';
+    
+    return { ...item, startInFinal, duration: dur, transcriptText };
   });
 
   // Helper: get the file field from a segment (supports both formats)
@@ -436,124 +444,112 @@ export default function VideoPreview({ jobId, downloadUrl, onReset, onReEdit }) 
     <div className="studio-main fade-in" style={{ height: '100%', width: '100%', display: 'flex', flexDirection: 'column' }}>
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
 
-        {/* Left Sidebar: Transcripts Inspector */}
-        <div className="studio-sidebar-left" style={{ width: `${sidebarLeftWidth}px`, flexShrink: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
-            <FileText size={16} style={{ color: 'var(--primary)' }} />
-            <h3 style={{ margin: 0, fontSize: '1rem', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-main)' }}>EGT Segments</h3>
+        {/* Left Sidebar: Settings / AI Tools */}
+        <div className="studio-sidebar-left" style={{ width: `${sidebarLeftWidth}px`, flexShrink: 0, padding: '1rem', background: 'var(--sidebar-bg)', display: 'flex', flexDirection: 'column' }}>
+          
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.5rem' }}>
+            <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-main)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <FileText size={16} style={{ color: 'var(--primary)' }} /> EDL SEQUENCE
+            </h3>
+            <button style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}>
+              <div style={{ width: '16px', height: '2px', background: 'currentColor', marginBottom: '4px' }} />
+              <div style={{ width: '16px', height: '2px', background: 'currentColor', marginBottom: '4px' }} />
+              <div style={{ width: '16px', height: '2px', background: 'currentColor' }} />
+            </button>
           </div>
-          <p style={{ color: 'var(--text-muted)', fontSize: '0.75rem', margin: '0 0 1.25rem 0', lineHeight: 1.4 }}>
-            Click any segment to inspect quality. Include/exclude segments to modify the EDL.
-          </p>
 
-          <div className="transcript-flow" style={{ flex: 1, overflowY: 'auto', paddingRight: '0.25rem' }}>
+          <div style={{ flex: 1, overflowY: 'auto', paddingRight: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            {warnings.length > 0 && (
+              <div style={{ padding: '0.75rem', background: 'rgba(239, 68, 68, 0.1)', border: '1px solid var(--danger)', borderRadius: 'var(--radius-sm)', marginBottom: '0.5rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--danger)', fontSize: '0.8rem', fontWeight: 700, marginBottom: '0.5rem' }}>
+                  <AlertTriangle size={14} /> BUDGET OVERRIDE
+                </div>
+                <div style={{ fontSize: '0.75rem', color: 'var(--text-main)', lineHeight: 1.4 }}>
+                  {warnings.map((w, i) => <div key={i} style={{ marginBottom: '0.25rem' }}>{w}</div>)}
+                  <div style={{ marginTop: '0.5rem', fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                    You can override these cuts by clicking the transcript bubbles to re-add segments.
+                  </div>
+                </div>
+              </div>
+            )}
+            
             {orderedTranscript.map((item, idx) => {
               const isKept = isSegmentKept(item);
-              const qualityScore = item.quality_score ?? 1.0;
-              const isBadTake = qualityScore < localQualityThreshold;
-              const segType = getSegType(item);
-              const isSelected = selectedSegment && (item.clip_id === selectedSegment.clip_id ||
-                (getSegFile(item) === getSegFile(selectedSegment) && Math.abs(getSegStart(item) - getSegStart(selectedSegment)) < 0.1));
-
+              const offset = getTranscriptOffset(item);
+              const type = getSegType(item);
+              const dur = getSegEnd(item) - getSegStart(item);
+              
               return (
-                <div
+                <div 
                   key={idx}
-                  className={`transcript-bubble ${isKept ? 'highlighted' : ''}`}
-                  onClick={() => handleTranscriptBubbleClick(item)}
                   style={{
-                    cursor: 'pointer',
-                    opacity: isBadTake && !isKept ? 0.4 : isKept ? 1.0 : 0.5,
-                    padding: '0.65rem',
-                    fontSize: '0.8rem',
-                    borderLeftWidth: '2px',
-                    marginBottom: '0.65rem',
-                    borderLeftColor: isBadTake ? 'var(--danger)' : undefined,
-                    borderLeftStyle: isBadTake ? 'dashed' : undefined,
-                    outline: isSelected ? '1px solid var(--primary)' : undefined,
-                    transition: 'all 0.2s ease',
+                    background: isKept ? 'var(--card-bg)' : 'rgba(255,255,255,0.02)',
+                    border: '1px solid',
+                    borderColor: isKept ? 'var(--card-border)' : 'rgba(255,255,255,0.05)',
+                    borderRadius: 'var(--radius-sm)',
+                    padding: '0.75rem',
+                    transition: 'all 0.2s',
+                    opacity: isKept ? 1 : 0.5,
+                    borderStyle: isKept ? 'solid' : 'dashed',
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.borderColor = isKept ? 'var(--primary)' : 'rgba(255,255,255,0.2)';
+                    e.currentTarget.style.opacity = isKept ? 1 : 0.8;
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.borderColor = isKept ? 'var(--card-border)' : 'rgba(255,255,255,0.05)';
+                    e.currentTarget.style.opacity = isKept ? 1 : 0.5;
                   }}
                 >
-                  <div className="bubble-meta" style={{ gap: '0.4rem', marginBottom: '0.2rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                      <span className="bubble-label" style={{
-                        fontSize: '0.65rem',
-                        fontWeight: 700,
-                        color: segType === 'INTRO' ? 'var(--primary)' :
-                               segType === 'OUTRO' ? 'var(--secondary)' :
-                               segType === 'SPEECH' || segType === 'HIGHLIGHT' ? 'var(--accent)' :
-                               segType === 'B_ROLL' ? 'var(--success)' :
-                               'var(--text-disabled)'
-                      }}>{segType}</span>
-                      <span className="bubble-time" style={{ fontSize: '0.7rem' }}>{formatTime(getSegStart(item))}</span>
-                      {item.clip_id && (
-                        <span style={{ fontSize: '0.6rem', color: 'var(--text-disabled)', fontFamily: 'monospace' }}>
-                          #{item.clip_id?.slice(0, 6)}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      <span style={{ fontSize: '0.7rem', fontWeight: 700, color: isKept ? getTypeBorderColor(type) : 'var(--text-disabled)' }}>
+                        {isKept ? (type || 'CLIP') : 'CUT'}
+                      </span>
+                      {!isKept && (
+                        <span style={{ fontSize: '0.6rem', padding: '0.1rem 0.3rem', background: 'var(--danger)', color: '#fff', borderRadius: '3px', fontWeight: 800 }}>
+                          REMOVED
                         </span>
                       )}
-                      {/* Quality score badge */}
-                      <span style={{
-                        fontSize: '0.6rem',
-                        padding: '0.05rem 0.3rem',
-                        borderRadius: '3px',
-                        background: `${getQualityColor(qualityScore)}22`,
-                        color: getQualityColor(qualityScore),
-                        fontWeight: 600
-                      }}>
-                        {Math.round(qualityScore * 100)}%
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', fontFamily: 'monospace' }}>
+                        {isKept && offset !== null ? `${formatTime(offset)} - ${formatTime(offset + dur)}` : `${formatTime(getSegStart(item))} - ${formatTime(getSegEnd(item))}`}
                       </span>
-                      {isBadTake && (
-                        <span style={{ fontSize: '0.6rem', padding: '0.05rem 0.25rem', borderRadius: '3px', background: 'rgba(239,68,68,0.1)', color: 'var(--danger)', fontWeight: 600 }}>BAD TAKE</span>
-                      )}
-                      {!isKept && !isBadTake && (
-                        <span style={{ fontSize: '0.6rem', padding: '0.05rem 0.25rem', borderRadius: '3px', background: 'rgba(239,68,68,0.1)', color: 'var(--danger)', fontWeight: 600 }}>CUT</span>
-                      )}
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleSegment(item);
+                        }}
+                        style={{
+                          background: isKept ? 'rgba(239, 68, 68, 0.2)' : 'rgba(16, 185, 129, 0.2)',
+                          color: isKept ? 'var(--danger)' : '#10B981',
+                          border: 'none',
+                          borderRadius: '3px',
+                          padding: '0.2rem 0.4rem',
+                          fontSize: '0.6rem',
+                          fontWeight: 800,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {isKept ? 'REMOVE' : 'RESTORE'}
+                      </button>
                     </div>
-
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        toggleSegment(item);
-                      }}
-                      style={{
-                        background: 'transparent',
-                        border: 'none',
-                        color: isKept ? 'var(--text-muted)' : 'var(--primary)',
-                        cursor: 'pointer',
-                        padding: '0.1rem',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        borderRadius: '3px'
-                      }}
-                      title={isKept ? "Exclude this segment" : "Include this segment"}
-                    >
-                      {isKept ? <XCircle size={13} /> : <Plus size={13} />}
-                    </button>
                   </div>
-                  <div style={{ lineHeight: 1.35 }}>{getSegText(item) || <i>(Visual scene / B-roll)</i>}</div>
-
-                  {/* Quality flags inline */}
-                  {item.quality_flags && item.quality_flags.length > 0 && (
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.25rem', marginTop: '0.3rem' }}>
-                      {item.quality_flags.map((flag, flagIdx) => {
-                        const flagInfo = QUALITY_FLAG_ICONS[flag] || { icon: '⚠️', label: flag };
-                        return (
-                          <span key={flagIdx} style={{
-                            fontSize: '0.6rem',
-                            padding: '0.05rem 0.3rem',
-                            borderRadius: '3px',
-                            background: 'rgba(239, 68, 68, 0.08)',
-                            color: 'var(--text-muted)',
-                          }} title={flagInfo.label}>
-                            {flagInfo.icon} {flagInfo.label}
-                          </span>
-                        );
-                      })}
-                    </div>
-                  )}
+                  <div 
+                    onClick={() => handleTranscriptBubbleClick(item)}
+                    style={{ fontSize: '0.75rem', color: 'var(--text-main)', lineHeight: 1.4, display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden', textDecoration: isKept ? 'none' : 'line-through', cursor: 'pointer' }}
+                  >
+                    {getSegText(item) || "No transcript available."}
+                  </div>
                 </div>
               );
             })}
+            {orderedTranscript.length === 0 && (
+              <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem', textAlign: 'center', padding: '1rem' }}>
+                No Transcript data available.
+              </div>
+            )}
           </div>
         </div>
 
@@ -575,9 +571,39 @@ export default function VideoPreview({ jobId, downloadUrl, onReset, onReEdit }) 
         />
 
         {/* Center Canvas: Visual Video Monitor */}
-        <div className="studio-canvas">
+        <div className="studio-canvas" style={{ position: 'relative' }}>
+          {!activeRawFile && (
+            <div style={{
+              position: 'absolute', top: '1rem', left: '1rem',
+              color: 'var(--text-muted)', fontSize: '0.65rem', fontWeight: 800,
+              letterSpacing: '0.05em', textTransform: 'uppercase',
+              display: 'flex', alignItems: 'center', gap: '0.4rem', zIndex: 10
+            }}>
+              <Film size={12} style={{ color: 'var(--primary)' }} /> PREVIEW MONITOR
+            </div>
+          )}
+          {activeRawFile && (
+            <div style={{
+              position: 'absolute', top: '1rem', left: '1rem',
+              color: '#EF4444', fontSize: '0.72rem', fontWeight: 700,
+              display: 'flex', alignItems: 'center', gap: '0.5rem', zIndex: 20
+            }}>
+              <span style={{ width: '6px', height: '6px', background: '#EF4444', borderRadius: '50%', display: 'inline-block' }} />
+              <span>PREVIEWING RAW: {activeRawFile}</span>
+              <button
+                onClick={() => setActiveRawFile(null)}
+                style={{
+                  background: 'rgba(255, 255, 255, 0.2)', border: 'none',
+                  borderRadius: '3px', color: '#fff', padding: '0.15rem 0.4rem',
+                  marginLeft: '0.5rem', cursor: 'pointer', fontSize: '0.65rem', fontWeight: 700
+                }}
+              >
+                Return to Vlog
+              </button>
+            </div>
+          )}
           <div className="studio-canvas-container" style={{ position: 'relative', width: '100%', height: '100%' }}>
-            <video
+              <video
               key={activeRawFile ? `raw-${activeRawFile}` : 'assembled'}
               ref={videoRef}
               src={activeRawFile ? `/api/jobs/${jobId}/raw/${activeRawFile}` : `${downloadUrl}?t=${renderedTimestamp}`}
@@ -587,30 +613,7 @@ export default function VideoPreview({ jobId, downloadUrl, onReset, onReEdit }) 
               controls
               autoPlay
             />
-            {activeRawFile && (
-              <div style={{
-                position: 'absolute', top: '1.25rem', left: '1.25rem',
-                background: 'rgba(239, 68, 68, 0.9)', backdropFilter: 'blur(10px)',
-                WebkitBackdropFilter: 'blur(10px)',
-                color: '#fff', fontSize: '0.72rem', fontWeight: 700,
-                padding: '0.4rem 0.8rem', borderRadius: '4px',
-                display: 'flex', alignItems: 'center', gap: '0.5rem', zIndex: 20,
-                border: '1px solid rgba(255, 255, 255, 0.1)'
-              }}>
-                <span style={{ width: '6px', height: '6px', background: '#fff', borderRadius: '50%', display: 'inline-block' }} />
-                <span>PREVIEWING RAW: {activeRawFile}</span>
-                <button
-                  onClick={() => setActiveRawFile(null)}
-                  style={{
-                    background: 'rgba(255, 255, 255, 0.2)', border: 'none',
-                    borderRadius: '3px', color: '#fff', padding: '0.15rem 0.4rem',
-                    marginLeft: '0.5rem', cursor: 'pointer', fontSize: '0.65rem', fontWeight: 700
-                  }}
-                >
-                  Return to Vlog
-                </button>
-              </div>
-            )}
+
           </div>
         </div>
 
@@ -632,274 +635,63 @@ export default function VideoPreview({ jobId, downloadUrl, onReset, onReEdit }) 
         />
 
         {/* Right Sidebar: Properties, Quality Inspector & Export */}
-        <div className="studio-sidebar-right" style={{ width: `${sidebarRightWidth}px`, flexShrink: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
-            <Play size={16} style={{ color: 'var(--secondary)' }} />
-            <h3 style={{ margin: 0, fontSize: '1rem', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-main)' }}>Properties</h3>
-          </div>
-          <p style={{ color: 'var(--text-muted)', fontSize: '0.75rem', margin: '0 0 1.25rem 0', lineHeight: 1.4 }}>
-            File details, quality inspection, and export actions.
-          </p>
-
-          {/* Video metadata */}
-          <div style={{ background: 'var(--tab-group-bg)', border: '1px solid var(--card-border)', padding: '0.75rem', borderRadius: 'var(--radius-sm)', fontSize: '0.75rem', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: 'var(--text-muted)' }}>Output:</span><span style={{ fontWeight: 600 }}>vlogforge_edit_{jobId.slice(0,8)}.mp4</span></div>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: 'var(--text-muted)' }}>Resolution:</span><span>1080p (30 FPS)</span></div>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: 'var(--text-muted)' }}>Final Length:</span><span style={{ color: 'var(--secondary)', fontWeight: 600 }}>{formatTime(cumulativeOffset)}</span></div>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: 'var(--text-muted)' }}>EDL Entries:</span><span>{edl.length}</span></div>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: 'var(--text-muted)' }}>EGT Segments:</span><span>{transcript.length}</span></div>
+        {/* Right Sidebar: Project Media */}
+        <div className="studio-sidebar-right" style={{ width: `${sidebarRightWidth}px`, flexShrink: 0, padding: '1rem', background: 'var(--sidebar-bg)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+            <h3 style={{ margin: 0, fontSize: '0.85rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-main)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <Film size={14} style={{ color: 'var(--primary)' }} /> PROJECT MEDIA
+            </h3>
+            <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>{rawFiles?.length || 1} items</span>
           </div>
 
-          {/* Global Quality Calibration */}
-          <div style={{
-            marginTop: '1rem',
-            background: 'var(--tab-group-bg)',
-            border: '1px solid var(--card-border)',
-            borderRadius: 'var(--radius-sm)',
-            padding: '0.75rem',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '0.75rem'
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-              <Sliders size={14} style={{ color: 'var(--primary)' }} />
-              <span style={{ fontSize: '0.75rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-main)' }}>AI Quality Threshold</span>
+
+          <div style={{ marginTop: '0.5rem' }}>
+            <h3 style={{ margin: 0, fontSize: '0.75rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>Project Details</h3>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', fontSize: '0.7rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: 'var(--text-disabled)' }}>Output:</span><span style={{ fontWeight: 600 }}>vlogforge_edit_{jobId?.slice(0,8)}.mp4</span></div>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: 'var(--text-disabled)' }}>Final Length:</span><span style={{ color: 'var(--text-main)', fontWeight: 600 }}>{formatTime(cumulativeOffset)}</span></div>
             </div>
             
-            <div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginTop: '1rem' }}>
+              <button className="btn btn-secondary" onClick={downloadTranscripts} style={{ padding: '0.4rem', fontSize: '0.7rem', border: 'none', background: 'rgba(255,255,255,0.05)', borderRadius: 'var(--radius-md)' }}>Export EGT</button>
+              <button className="btn btn-secondary" onClick={downloadEDL} style={{ padding: '0.4rem', fontSize: '0.7rem', border: 'none', background: 'rgba(255,255,255,0.05)', borderRadius: 'var(--radius-md)' }}>Export EDL</button>
+            </div>
+            
+            <div style={{ marginTop: '1.5rem', borderTop: '1px solid var(--card-border)', paddingTop: '1.5rem' }}>
+              <h3 style={{ margin: 0, fontSize: '0.75rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-muted)', marginBottom: '1rem' }}>Quality Calibration</h3>
+              
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
-                <label htmlFor="quality-slider-studio" style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
-                  Filter Threshold
-                </label>
-                <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--secondary)' }}>{localQualityThreshold.toFixed(2)}</span>
+                <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>Threshold</span>
+                <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--primary)' }}>{localQualityThreshold.toFixed(2)}</span>
               </div>
               <input 
                 type="range" 
-                id="quality-slider-studio"
                 min="0" max="1" step="0.05"
                 value={localQualityThreshold}
                 onChange={(e) => setLocalQualityThreshold(parseFloat(e.target.value))}
-                style={{ width: '100%', accentColor: 'var(--primary)' }}
-                title="Higher threshold = more aggressive AI trimming"
+                style={{ width: '100%', accentColor: 'var(--primary)', height: '4px', background: '#333', outline: 'none', borderRadius: '2px', WebkitAppearance: 'none' }}
               />
-            </div>
-            
-            <button
-              className="btn-primary"
-              onClick={handleReReason}
-              disabled={isReReasoning}
-              style={{
-                width: '100%',
-                display: 'flex',
-                justifyContent: 'center',
-                alignItems: 'center',
-                gap: '0.5rem',
-                padding: '0.6rem',
-                fontSize: '0.75rem'
-              }}
-            >
-              {isReReasoning ? (
-                <><Loader2 size={14} className="spin" /> Re-evaluating...</>
-              ) : (
-                <><Sparkles size={14} /> Re-Evaluate Quality</>
-              )}
-            </button>
-          </div>
-
-          {/* Quality Inspector Panel */}
-          {selectedSegment && (
-            <div style={{
-              marginTop: '1rem',
-              background: 'var(--tab-group-bg)',
-              border: '1px solid var(--card-border)',
-              borderRadius: 'var(--radius-sm)',
-              padding: '0.75rem',
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.5rem' }}>
-                <Activity size={14} style={{ color: 'var(--accent)' }} />
-                <span style={{ fontSize: '0.75rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-main)' }}>Quality Inspector</span>
-              </div>
-
-              {/* Clip ID */}
-              {selectedSegment.clip_id && (
-                <div style={{ fontSize: '0.7rem', color: 'var(--text-disabled)', fontFamily: 'monospace', marginBottom: '0.5rem' }}>
-                  clip_id: {selectedSegment.clip_id}
-                </div>
-              )}
-
-              {/* Quality score bar */}
-              <div style={{ marginBottom: '0.5rem' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', marginBottom: '0.2rem' }}>
-                  <span style={{ color: 'var(--text-muted)' }}>Quality Score</span>
-                  <span style={{ fontWeight: 700, color: getQualityColor(selectedSegment.quality_score ?? 1.0) }}>
-                    {Math.round((selectedSegment.quality_score ?? 1.0) * 100)}%
-                  </span>
-                </div>
-                <div style={{ height: '6px', borderRadius: '3px', background: 'rgba(255,255,255,0.05)', overflow: 'hidden' }}>
-                  <div style={{
-                    height: '100%',
-                    width: `${(selectedSegment.quality_score ?? 1.0) * 100}%`,
-                    background: getQualityColor(selectedSegment.quality_score ?? 1.0),
-                    borderRadius: '3px',
-                    transition: 'width 0.3s ease',
-                  }} />
-                </div>
-              </div>
-
-              {/* Segment info */}
-              <div style={{ fontSize: '0.7rem', display: 'flex', flexDirection: 'column', gap: '0.3rem', marginBottom: '0.5rem' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                  <span style={{ color: 'var(--text-muted)' }}>Type:</span>
-                  <span style={{ fontWeight: 600 }}>{getSegType(selectedSegment)}</span>
-                </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                  <span style={{ color: 'var(--text-muted)' }}>Duration:</span>
-                  <span>{formatTime(getSegEnd(selectedSegment) - getSegStart(selectedSegment))}s</span>
-                </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                  <span style={{ color: 'var(--text-muted)' }}>Source:</span>
-                  <span style={{ fontSize: '0.65rem' }}>{getSegFile(selectedSegment)}</span>
-                </div>
-                {selectedSegment.language_id && (
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span style={{ color: 'var(--text-muted)' }}>Language:</span>
-                    <span>{selectedSegment.language_id}</span>
-                  </div>
-                )}
-              </div>
-
-              {/* Quality flags detail */}
-              {selectedSegment.quality_flags && selectedSegment.quality_flags.length > 0 && (
-                <div style={{ borderTop: '1px solid var(--card-border)', paddingTop: '0.5rem' }}>
-                  <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginBottom: '0.3rem', fontWeight: 600, textTransform: 'uppercase' }}>Quality Flags</div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
-                    {selectedSegment.quality_flags.map((flag, flagIdx) => {
-                      const flagInfo = QUALITY_FLAG_ICONS[flag] || { icon: '⚠️', label: flag };
-                      return (
-                        <div key={flagIdx} style={{
-                          fontSize: '0.7rem',
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '0.4rem',
-                          padding: '0.2rem 0.4rem',
-                          borderRadius: '3px',
-                          background: 'rgba(239, 68, 68, 0.06)',
-                        }}>
-                          <span>{flagInfo.icon}</span>
-                          <span style={{ color: 'var(--text-main)' }}>{flagInfo.label}</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {/* Tags */}
-              {selectedSegment.tags && selectedSegment.tags.length > 0 && (
-                <div style={{ borderTop: '1px solid var(--card-border)', paddingTop: '0.5rem', marginTop: '0.5rem' }}>
-                  <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginBottom: '0.3rem', fontWeight: 600, textTransform: 'uppercase' }}>Tags</div>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.25rem' }}>
-                    {selectedSegment.tags.map((tag, tagIdx) => (
-                      <span key={tagIdx} style={{
-                        fontSize: '0.6rem',
-                        padding: '0.1rem 0.35rem',
-                        borderRadius: '3px',
-                        background: 'rgba(139, 92, 246, 0.1)',
-                        color: 'var(--primary)',
-                      }}>
-                        {tag}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Override button */}
-              <div style={{ marginTop: '0.75rem' }}>
+              
+              <button
+                className="btn btn-primary"
+                onClick={handleReReason}
+                disabled={isReReasoning}
+                style={{ width: '100%', padding: '0.6rem', fontSize: '0.75rem', marginTop: '1rem', display: 'flex', justifyContent: 'center', gap: '0.5rem', borderRadius: 'var(--radius-md)' }}
+              >
+                {isReReasoning ? 'RE-EVALUATING...' : 'RE-GENERATE'}
+              </button>
+              
+              {onReEdit && (
                 <button
                   className="btn btn-secondary"
-                  onClick={() => toggleSegment(selectedSegment)}
-                  style={{
-                    width: '100%',
-                    padding: '0.5rem',
-                    borderRadius: 'var(--radius-sm)',
-                    fontSize: '0.75rem',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: '0.4rem',
-                    background: 'var(--tab-group-bg)',
-                  }}
+                  onClick={onReEdit}
+                  style={{ width: '100%', padding: '0.5rem', fontSize: '0.7rem', marginTop: '0.5rem', border: 'none', background: 'rgba(255,255,255,0.05)', borderRadius: 'var(--radius-md)' }}
                 >
-                  {isSegmentKept(selectedSegment)
-                    ? <><XCircle size={13} /> Exclude from EDL</>
-                    : <><Plus size={13} /> Include in EDL</>
-                  }
+                  Edit Project Setup
                 </button>
-              </div>
+              )}
             </div>
-          )}
-
-          {/* Download actions */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '1rem' }}>
-            <a
-              href={downloadUrl}
-              download
-              className="btn btn-primary"
-              style={{ padding: '0.65rem', borderRadius: 'var(--radius-sm)', fontSize: '0.85rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem' }}
-            >
-              Download Video
-            </a>
-
-            <button
-              className="btn btn-secondary"
-              onClick={downloadTranscripts}
-              style={{ padding: '0.65rem', borderRadius: 'var(--radius-sm)', fontSize: '0.85rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', background: 'var(--tab-group-bg)' }}
-            >
-              Export EGT JSON
-            </button>
-
-            <button
-              className="btn btn-secondary"
-              onClick={downloadEDL}
-              style={{ padding: '0.65rem', borderRadius: 'var(--radius-sm)', fontSize: '0.85rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', background: 'var(--tab-group-bg)' }}
-            >
-              Export EDL JSON
-            </button>
           </div>
-
-          {/* Project actions */}
-          <div style={{ borderTop: '1px solid var(--card-border)', paddingTop: '1.5rem', marginTop: '1.5rem', display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
-            {onReEdit && (
-              <button
-                className="btn btn-secondary"
-                onClick={onReEdit}
-                style={{ width: '100%', padding: '0.65rem', borderRadius: 'var(--radius-sm)', fontSize: '0.85rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem' }}
-              >
-                <Pencil size={14} /> Edit Prompt & Re-generate
-              </button>
-            )}
-            <button
-              className="btn btn-secondary"
-              onClick={onReset}
-              style={{ width: '100%', padding: '0.65rem', borderRadius: 'var(--radius-sm)', fontSize: '0.85rem', borderColor: 'var(--card-border)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem' }}
-            >
-              <RotateCcw size={14} /> Start New Project
-            </button>
-          </div>
-
-          {/* AI Creative Insight card */}
-          <div style={{
-            marginTop: '1.25rem',
-            background: 'rgba(139, 92, 246, 0.02)',
-            border: '1px solid var(--card-border)',
-            borderRadius: 'var(--radius-sm)',
-            padding: '0.75rem'
-          }}>
-            <div style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--primary)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.25rem' }}>AI Creative Insight</div>
-            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: 1.4 }}>{contextDoc || "No creative details logged."}</div>
-          </div>
-
         </div>
 
       </div>
@@ -948,224 +740,124 @@ export default function VideoPreview({ jobId, downloadUrl, onReset, onReEdit }) 
       <div className="studio-bottom-panel" style={{ height: `${timelineHeight}px`, flexShrink: 0, overflow: 'hidden' }}>
         <div className="timeline-workspace">
 
-          <div className="timeline-toolbar">
-            <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                <Scissors size={14} style={{ color: 'var(--accent)' }} />
-                <span style={{ fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Timeline</span>
+          {/* New NLE Toolbar */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.5rem 1rem', background: 'var(--header-bg)', borderBottom: '1px solid var(--card-border)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '1.5rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-main)', fontSize: '0.8rem', fontWeight: 800, letterSpacing: '0.05em' }}>
+                <Film size={14} style={{ color: 'var(--primary)' }} /> NLE TIMELINE
               </div>
-              <div className="timeline-tab-group">
-                <button
-                  className={`timeline-tab ${viewMode === 'assembled' ? 'active' : ''}`}
-                  onClick={() => {
-                    setViewMode('assembled');
-                    setActiveRawFile(null);
-                  }}
-                >
-                  Assembled Vlog
-                </button>
-                <button
-                  className={`timeline-tab ${viewMode === 'original' ? 'active' : ''}`}
-                  onClick={() => setViewMode('original')}
-                >
-                  Original Footage
-                </button>
+              <div style={{ width: '1px', height: '14px', background: 'var(--card-border)' }} />
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.2rem', color: 'var(--text-main)' }}>
+                <button style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer' }}><span style={{ transform: 'rotate(180deg)', display: 'inline-block' }}><Play size={16} fill="currentColor" /></span></button>
+                <button style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', padding: '0.5rem' }}><Play size={24} fill="currentColor" /></button>
+                <button style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer' }}><Play size={16} fill="currentColor" /></button>
               </div>
-              {/* Phase 0 notice */}
-              <div style={{
-                display: 'flex', alignItems: 'center', gap: '0.3rem',
-                fontSize: '0.65rem', color: 'var(--text-disabled)',
-                padding: '0.2rem 0.5rem',
-                borderRadius: '3px',
-                background: 'rgba(139, 92, 246, 0.05)',
-                border: '1px solid var(--card-border)',
-              }}>
-                <Shield size={10} />
-                <span>Phase 0: Chronological order locked</span>
+              <div style={{ fontSize: '0.85rem', fontWeight: 600, fontFamily: 'monospace' }}>
+                {formatTime(currentTime)} / {formatTime(cumulativeOffset)}
               </div>
             </div>
+            
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <span>Playhead:</span>
-              <span className="timeline-playhead-time">
-                {formatTime(currentTime)}
-              </span>
-              <span>/</span>
-              <span>
-                {formatTime(activeRawFile ? (rawFiles.find(f => f.filename === activeRawFile)?.duration || 0) : cumulativeOffset)}
-              </span>
-            </div>
           </div>
 
-          {viewMode === 'assembled' ? (
-            <div className="timeline-track-container">
-              <div className="timeline-track" ref={timelineTrackRef} onClick={handleTimelineClick}>
+          <div style={{ display: 'flex', height: 'calc(100% - 45px)', background: 'var(--bg-color)', overflowY: 'auto' }}>
+            {/* Left Track Labels */}
+            <div style={{ width: '100px', flexShrink: 0, background: 'var(--sidebar-bg)', borderRight: '1px solid var(--card-border)', display: 'flex', flexDirection: 'column' }}>
+              <div style={{ height: '30px', borderBottom: '1px solid var(--card-border)' }} /> {/* Ruler spacer */}
+              
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+                <div style={{ height: '60px', display: 'flex', alignItems: 'center', paddingLeft: '0.5rem', fontSize: '0.75rem', fontWeight: 700, color: '#10B981' }}>Video 1</div>
+              </div>
+            </div>
 
-                {/* Playhead indicator line */}
-                <div
-                  className="timeline-playhead-line"
-                  style={{ left: `${playheadPositionPercent}%` }}
-                >
-                  <div className="timeline-playhead-handle" />
-                </div>
-
-                {/* Render block segments */}
-                {edlWithOffsets.map((item, idx) => {
-                  const widthPercent = (item.duration / cumulativeOffset) * 100;
-                  const segType = item.editorial_type || item.type || 'KEEP';
-                  const typeColor = getTypeColor(segType);
-                  const borderColor = getTypeBorderColor(segType);
-                  const isBlockActive = currentTime >= item.startInFinal && currentTime < item.startInFinal + item.duration;
-
+            {/* Timeline Tracks Area */}
+            <div style={{ flex: 1, position: 'relative', overflowX: 'auto', display: 'flex', flexDirection: 'column' }}>
+              
+              {/* Ruler */}
+              <div style={{ height: '30px', borderBottom: '1px solid var(--card-border)', display: 'flex', position: 'relative', background: 'var(--bg-color)' }}>
+                {Array.from({length: Math.ceil(cumulativeOffset || 20)}).map((_, i) => {
+                  const step = Math.max(1, Math.ceil((cumulativeOffset || 20) / 15));
+                  if (i % step !== 0) return null;
                   return (
-                    <div
-                      key={idx}
-                      className={`timeline-block ${isBlockActive ? 'active' : ''}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleSeek(item.startInFinal);
-                      }}
-                      style={{
-                        width: `${widthPercent}%`,
-                        background: typeColor,
-                        borderColor: borderColor,
-                        borderLeft: '2px solid',
-                        borderLeftColor: borderColor,
-                        boxShadow: isBlockActive ? `0 0 8px ${borderColor}` : 'none',
-                        cursor: 'pointer',
-                        transition: 'all 0.2s ease',
-                      }}
-                      title={`${segType}: ${item.source_file || item.video_file} (${formatTime(item.duration)}s)`}
-                    >
-                      <div className="timeline-block-title" style={{ color: '#fff' }}>{segType}</div>
-                      <div className="timeline-block-duration">{formatTime(item.duration)}s</div>
+                    <div key={i} style={{ position: 'absolute', left: `${(i / (cumulativeOffset || 20)) * 100}%`, top: '50%', transform: 'translateX(-50%)', fontSize: '0.65rem', color: 'var(--text-muted)' }}>
+                      {i}s
                     </div>
                   );
                 })}
+              </div>
 
+              {/* Playhead */}
+              <div style={{ position: 'absolute', top: 0, bottom: 0, left: `${playheadPositionPercent}%`, width: '1px', background: '#fff', zIndex: 10 }}>
+                <div style={{ position: 'absolute', top: '15px', left: '-4px', width: '9px', height: '9px', borderRadius: '50%', background: '#fff' }} />
+              </div>
+
+              <div style={{ flex: 1, position: 'relative' }} ref={timelineTrackRef} onClick={handleTimelineClick}>
+                
+                {/* Video 1 Track (Actual EDL) */}
+                <div style={{ position: 'absolute', top: 0, height: '60px', width: '100%', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                  {edlWithOffsets.map((item, idx) => {
+                    const widthPercent = (item.duration / (cumulativeOffset || 20)) * 100;
+                    const leftPercent = (item.startInFinal / (cumulativeOffset || 20)) * 100;
+                    const isBlockActive = currentTime >= item.startInFinal && currentTime < item.startInFinal + item.duration;
+                    return (
+                      <div key={idx} style={{
+                        position: 'absolute',
+                        left: `${leftPercent}%`,
+                        width: `${widthPercent}%`,
+                        height: '40px',
+                        top: '10px',
+                        background: '#1F2937',
+                        borderRadius: '4px',
+                        border: isBlockActive ? '2px solid var(--primary)' : '1px solid #374151',
+                        display: 'flex',
+                        overflow: 'hidden',
+                        cursor: 'pointer'
+                      }} onClick={(e) => { e.stopPropagation(); handleSeek(item.startInFinal); }}>
+                        <div style={{ padding: '0.2rem', fontSize: '0.65rem', color: '#fff', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {item.editorial_type || 'Clip'}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Dummy tracks removed for simplicity */}
               </div>
             </div>
-          ) : (
-            <div className="timeline-multi-track-container">
-              {rawFiles.map((file, fileIdx) => {
-                const fileSegments = transcript.filter(s => getSegFile(s) === file.filename);
-
-                // Track dynamic playhead for this file track
-                let isTrackActive = false;
-                let playheadPercent = 0;
-
-                if (activeRawFile) {
-                  if (activeRawFile === file.filename) {
-                    isTrackActive = true;
-                    if (file.duration > 0) {
-                      playheadPercent = (currentTime / file.duration) * 100;
-                    }
-                  }
-                } else {
-                  const activeEdlItem = edlWithOffsets.find(
-                    item => currentTime >= item.startInFinal && currentTime < item.startInFinal + item.duration
-                  );
-                  const activeFile = activeEdlItem ? (activeEdlItem.source_file || activeEdlItem.video_file) : null;
-                  if (activeEdlItem && activeFile === file.filename) {
-                    isTrackActive = true;
-                    if (file.duration > 0) {
-                      const currentSecInRaw = activeEdlItem.start_sec + (currentTime - activeEdlItem.startInFinal);
-                      playheadPercent = (currentSecInRaw / file.duration) * 100;
-                    }
-                  }
-                }
-
-                return (
-                  <div key={fileIdx} className="timeline-track-wrapper">
-                    <div className="timeline-track-header">
-                      <span className="timeline-track-title">{file.filename}</span>
-                      <span className="timeline-track-duration">{formatTime(file.duration)}</span>
-                    </div>
-
-                    <div
-                      className="timeline-track"
-                      onClick={(e) => handleRawTrackClick(e, file)}
-                    >
-                      {/* Playhead indicator line */}
-                      {isTrackActive && (
-                        <div
-                          className="timeline-playhead-line"
-                          style={{ left: `${playheadPercent}%` }}
-                        >
-                          <div className="timeline-playhead-handle" />
-                        </div>
-                      )}
-
-                      {/* Render segments for this file */}
-                      {fileSegments.map((segment, segIdx) => {
-                        const isKept = isSegmentKept(segment);
-                        const qualityScore = segment.quality_score ?? 1.0;
-                        const isBadTake = qualityScore < localQualityThreshold;
-                        const segDur = getSegEnd(segment) - getSegStart(segment);
-                        const widthPercent = (segDur / file.duration) * 100;
-                        const segType = getSegType(segment);
-                        const typeColor = getTypeColor(segType);
-                        const borderColor = getTypeBorderColor(segType);
-
-                        const isBlockActive = isTrackActive && (
-                          activeRawFile
-                            ? (currentTime >= getSegStart(segment) && currentTime < getSegEnd(segment))
-                            : (() => {
-                                const activeEdlItem = edlWithOffsets.find(
-                                  item => currentTime >= item.startInFinal && currentTime < item.startInFinal + item.duration
-                                );
-                                return activeEdlItem && segmentsMatch(activeEdlItem, segment);
-                              })()
-                        );
-
-                        return (
-                          <div
-                            key={segIdx}
-                            className={`timeline-block ${isBlockActive ? 'active' : ''} ${isKept ? '' : 'cut'}`}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleSeekRaw(file.filename, getSegStart(segment));
-                              setSelectedSegment(segment);
-                            }}
-                            style={{
-                              width: `${widthPercent}%`,
-                              background: isKept ? typeColor : isBadTake ? 'rgba(239, 68, 68, 0.1)' : undefined,
-                              borderColor: isBadTake ? 'var(--danger)' : borderColor,
-                              borderLeft: isBadTake ? '2px dashed' : '2px solid',
-                              borderLeftColor: isBadTake ? 'var(--danger)' : borderColor,
-                              boxShadow: isBlockActive && isKept ? `0 0 8px ${borderColor}` : 'none'
-                            }}
-                            title={`${segType}: ${formatTime(segDur)}s (${getSegText(segment) || 'Visual scene'})${isBadTake ? ' [BAD TAKE]' : ''}`}
-                          >
-                            <div className="timeline-block-title" style={{ color: isKept ? '#fff' : isBadTake ? 'var(--danger)' : 'var(--text-disabled)' }}>
-                              {segType}
-                            </div>
-                            <div className="timeline-block-duration">
-                              {formatTime(segDur)}s
-                            </div>
-
-                            <button
-                              className="timeline-block-hover-action"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                toggleSegment(segment);
-                              }}
-                            >
-                              {isKept ? <XCircle size={11} /> : <Plus size={11} />}
-                              <span>{isKept ? 'Exclude' : 'Include'}</span>
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-
+          </div>
         </div>
       </div>
+
+      {/* Re-rendering Loader Overlay */}
+      {isReRendering && (
+        <div className="re-render-overlay" style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.8)', zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div className="re-render-box" style={{ background: 'var(--card-bg)', padding: '2rem', borderRadius: 'var(--radius-lg)', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '1rem', border: '1px solid var(--card-border)' }}>
+            <Loader2 className="spinner" size={32} style={{ color: 'var(--primary)' }} />
+            <div className="re-render-title" style={{ color: 'var(--text-main)', fontWeight: 700 }}>Re-rendering Vlog</div>
+            <div className="re-render-desc" style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+              FFmpeg is cutting and joining video segments into a new composition. This will take just a few seconds...
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Mock Export Modals (Controlled by state or just hidden for now, showing the structure) */}
+      {/* 
+      <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.9)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ background: 'var(--card-bg)', border: '1px solid var(--card-border)', padding: '2rem', borderRadius: 'var(--radius-lg)', display: 'flex', gap: '2rem', maxWidth: '600px' }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ aspectRatio: '16/9', background: '#333', borderRadius: 'var(--radius-md)' }} />
+          </div>
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)', fontSize: '0.75rem' }}><span>Resolution</span> <span style={{color: 'white'}}>1080p</span></div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)', fontSize: '0.75rem' }}><span>Bit rate</span> <span style={{color: 'white'}}>High</span></div>
+            <div style={{ width: '100%', height: '4px', background: '#333', borderRadius: '2px', marginTop: 'auto' }}><div style={{ width: '50%', height: '100%', background: 'var(--primary)' }} /></div>
+            <button className="btn-secondary" style={{ width: '100%' }}>CANCEL</button>
+          </div>
+        </div>
+      </div>
+      */}
+
     </div>
   );
 }
