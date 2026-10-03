@@ -1,3 +1,4 @@
+from app.config import settings
 """Tests for M4 batched classification (classify_egt_segments_batch).
 
 Tests batch grouping, fallback per-segment behaviour on batch failure,
@@ -57,7 +58,7 @@ def test_batch_classification_groups_correctly():
     segments = [_make_seg_dict(i) for i in range(12)]
     call_args = []
 
-    def mock_safe_generate(model, contents, config):
+    def mock_safe_generate(model, contents, config, **kwargs):
         call_args.append(contents)
         import re
         ids_in_prompt = re.findall(r'"clip_id":\s*"([^"]+)"', contents)
@@ -90,7 +91,7 @@ def test_batch_classification_updates_segment_type():
     segments = [_make_seg_dict(i) for i in range(3)]
     segments[0]["transcript"] = "Hey guys welcome back!"
 
-    def mock_safe_generate(model, contents, config):
+    def mock_safe_generate(model, contents, config, **kwargs):
         import re
         ids_in_prompt = re.findall(r'"clip_id":\s*"([^"]+)"', contents)
         classifications = []
@@ -121,7 +122,7 @@ def test_batch_classification_fallback_on_batch_failure():
     segments = [_make_seg_dict(i) for i in range(4)]
     call_count = [0]
 
-    def mock_safe_generate(model, contents, config):
+    def mock_safe_generate(model, contents, config, **kwargs):
         call_count[0] += 1
         if call_count[0] == 1:
             raise RuntimeError("Rate limit exceeded")
@@ -163,7 +164,7 @@ def test_batch_classification_marks_perception_model():
     """After successful batch classification, perception_model should be set."""
     segments = [_make_seg_dict(i) for i in range(2)]
 
-    def mock_safe_generate(model, contents, config):
+    def mock_safe_generate(model, contents, config, **kwargs):
         import re
         ids = re.findall(r'"clip_id":\s*"([^"]+)"', contents)
         classifications = [
@@ -185,4 +186,4 @@ def test_batch_classification_marks_perception_model():
         result = classify_egt_segments_batch(segments, "Context.", batch_size=10)
 
     for seg in result:
-        assert "gemini-flash-lite-latest (batch)" in seg["perception_model"]
+        assert f"{settings.perception_model} (batch)" in seg["perception_model"]

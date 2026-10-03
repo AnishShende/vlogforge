@@ -3,6 +3,7 @@ import { Film, Sparkles, Sliders, Clock, Loader2, Home, LayoutDashboard, Setting
 import UploadPanel from './components/UploadPanel';
 import ProcessingMonitor from './components/ProcessingMonitor';
 import VideoPreview from './components/VideoPreview';
+import DownloadPanel from './components/DownloadPanel';
 import * as tus from 'tus-js-client';
 
 import Login from './components/auth/Login';
@@ -107,6 +108,7 @@ export default function App() {
   const [qualityThreshold, setQualityThreshold] = useState(0.20); // Conservative default
   const [projectName, setProjectName] = useState('Vlog Preview');
   const [currentProjectId, setCurrentProjectId] = useState(null);
+  const [showExportModal, setShowExportModal] = useState(false);
 
   // Check auth on load
   useEffect(() => {
@@ -417,13 +419,7 @@ export default function App() {
             {step === 3 && (
               <button 
                 className="btn-primary" 
-                onClick={() => {
-                  if (downloadUrl) {
-                    window.open(downloadUrl, '_blank');
-                  } else {
-                    alert('Download URL not ready yet.');
-                  }
-                }}
+                onClick={() => setShowExportModal(true)}
                 style={{ 
                   padding: '0.6rem 1.2rem', 
                   borderRadius: '6px', 
@@ -629,6 +625,73 @@ export default function App() {
       )}
         </main>
       </div>
+
+      {/* ═══ EXPORT MODAL OVERLAY ═══ */}
+      {showExportModal && (
+        <div 
+          style={{
+            position: 'fixed',
+            top: 0, left: 0, right: 0, bottom: 0,
+            background: 'rgba(0, 0, 0, 0.75)',
+            backdropFilter: 'blur(8px)',
+            zIndex: 9999,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '2rem'
+          }}
+          onClick={() => setShowExportModal(false)}
+        >
+          <div 
+            style={{
+              background: 'var(--bg-main)',
+              borderRadius: 'var(--radius-xl)',
+              maxWidth: '800px',
+              width: '100%',
+              maxHeight: '90vh',
+              overflowY: 'auto',
+              position: 'relative',
+              boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.5)',
+              border: '1px solid var(--card-border)'
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button 
+              onClick={() => setShowExportModal(false)}
+              style={{
+                position: 'absolute',
+                top: '1rem',
+                right: '1rem',
+                background: 'rgba(255,255,255,0.1)',
+                border: 'none',
+                color: 'var(--text-main)',
+                cursor: 'pointer',
+                borderRadius: '50%',
+                width: '32px',
+                height: '32px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                zIndex: 10
+              }}
+            >
+              <XCircle size={20} />
+            </button>
+            
+            <div style={{ padding: '2rem' }}>
+              <DownloadPanel 
+                jobId={jobId} 
+                downloadUrl={downloadUrl} 
+                onReset={() => {
+                  setShowExportModal(false);
+                  resetProject();
+                }} 
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

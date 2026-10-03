@@ -58,7 +58,7 @@ def build_egt_document(
     bad_take_count = 0
     for seg in segments:
         type_dist[seg.segment_type] = type_dist.get(seg.segment_type, 0) + 1
-        if seg.is_bad_take:
+        if seg.is_bad_take or getattr(seg, "is_superseded_take", False):
             bad_take_count += 1
 
     logger.info(
@@ -66,7 +66,7 @@ def build_egt_document(
         f"{len(segments)} segments, "
         f"{source_file_count} source files, "
         f"{total_duration:.1f}s total duration, "
-        f"{bad_take_count} bad takes"
+        f"{bad_take_count} bad/superseded takes"
     )
     logger.info(f"EGT segment type distribution: {type_dist}")
 

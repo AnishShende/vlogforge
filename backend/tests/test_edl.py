@@ -182,6 +182,7 @@ def test_generate_edl_noise_reduction():
     assert "vid2.mp4" in contrib_files
 
 def test_generate_edl_duration_window():
+    from unittest.mock import patch
     # Target duration: 60s. Allowed window: 60 +/- 10s = 50s to 70s.
     scenes = [
         {"video_file": "vid1.mp4", "start": 0.0, "end": 10.0, "label": "INTRO", "score": 0.9},
@@ -189,7 +190,9 @@ def test_generate_edl_duration_window():
         {"video_file": "vid2.mp4", "start": 0.0, "end": 35.0, "label": "B_ROLL", "score": 0.75}, # 35s - would push total past 70s (10s + 30s + 35s + 10s = 85s)
         {"video_file": "vid2.mp4", "start": 35.0, "end": 45.0, "label": "OUTRO", "score": 0.9} # 10s
     ]
-    edl = generate_edl(scenes, total_raw_duration=95.0, target_duration_sec=60.0)
+    with patch("app.tasks.reasoning.edl_v1.select_reel_segments_llm", return_value=None), \
+         patch("app.tasks.reasoning.edl_v1.sequence_edl_segments", side_effect=lambda scenes, ctx: scenes):
+        edl = generate_edl(scenes, total_raw_duration=95.0, target_duration_sec=60.0)
     total_dur = sum(item["end_sec"] - item["start_sec"] for item in edl)
     # The B-roll must be skipped since it violates the +10s per minute limit (85s > 70s max).
     # So the total duration should be exactly 10 (intro) + 30 (highlight) + 10 (outro) = 50s.

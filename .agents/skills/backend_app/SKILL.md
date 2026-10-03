@@ -8,6 +8,8 @@ description: "The FastAPI application package that defines the HTTP API, data mo
 ## 📌 Purpose & Responsibility
 - The **FastAPI application root** — defines all HTTP REST and WebSocket endpoints that the React frontend consumes.
 - `main.py`: All route definitions (job creation, status, EGT/EDL/transcript retrieval, download, re-render, re-reason, raw video serving, and WebSocket connection).
+- `routers/`: Contains isolated FastAPI routers for `auth.py`, `projects.py`, and `upload.py`.
+- `database.py` / `db_models.py`: SQLAlchemy setup and ORM models mapping to Postgres tables.
 - `models.py`: All Pydantic schemas shared across the entire backend — `EGTSegment`, `EGTDocument`, `EDLEntry`, `EDLItem` (legacy), `VideoFileInfo`, `JobStatus`, `WSProgressEvent`, `JobCreate`.
 - `config.py`: Application settings loaded from `.env` via `pydantic-settings`. Controls model selection, quality threshold, scene detection parameters, and directory paths with automatic cross-platform path correction.
 
@@ -43,6 +45,8 @@ description: "The FastAPI application package that defines the HTTP API, data mo
   - `quality_threshold`, `content_detector_threshold`, `adaptive_detector_threshold`, `long_scene_threshold_sec`, `min_scene_duration_sec` — tunable pipeline parameters.
   - Auto-translates Windows `D:` drive defaults to local workspace paths on non-Windows systems.
   - `settings` singleton instantiated at module level; consumed everywhere.
+
+- [database.py](backend/app/database.py) / [db_models.py](backend/app/db_models.py): Defines the `get_db` dependency, AsyncSessionLocal, and SQLAlchemy models (`User`, etc.).
 
 ## 🌿 Subdirectories & Child Skills
 - [tasks](.agents/skills/backend_app_tasks/SKILL.md): All pipeline stage implementations (ingest, transcribe, analyze, score, EGT build, EDL generate, assemble, orchestrate).

@@ -410,7 +410,7 @@ def subdivide_by_speech_gaps(
             )
             gap_kf_path = os.path.join(keyframes_dir, gap_kf_filename)
 
-            has_meaningful = True  # Conservative default: preserve
+            has_meaningful = False  # Default to split on failure to prevent downstream LLM cascading
 
             if video_path and keyframes_dir:
                 kf_ok = extract_keyframe(video_path, gap_mid, gap_kf_path)
@@ -418,19 +418,26 @@ def subdivide_by_speech_gaps(
                     _desc, has_meaningful = describe_keyframe(
                         gap_kf_path, context_notes, classify_content=True
                     )
-                    logger.info(
-                        f"Pass 3: Gap [{gap_start:.1f}s-{gap_end:.1f}s] → "
-                        f"meaningful={has_meaningful}"
-                    )
+                    
+                    if _desc == "Visual description unavailable due to API error.":
+                        logger.warning(
+                            f"Pass 3: gap_meaningfulness_fallback_used: true for gap at {gap_mid:.1f}s. "
+                            f"Defaulting to meaningful={has_meaningful} due to quota/error."
+                        )
+                    else:
+                        logger.info(
+                            f"Pass 3: Gap [{gap_start:.1f}s-{gap_end:.1f}s] → "
+                            f"meaningful={has_meaningful}"
+                        )
                 else:
                     logger.warning(
                         f"Pass 3: Keyframe extraction failed for gap at {gap_mid:.1f}s. "
-                        "Preserving gap (conservative)."
+                        "Splitting gap (conservative)."
                     )
             else:
                 logger.warning(
                     "Pass 3: No video_path or keyframes_dir provided. "
-                    "Preserving all gaps (conservative)."
+                    "Splitting all gaps (conservative)."
                 )
 
             if not has_meaningful:
@@ -484,6 +491,13 @@ def subdivide_by_speech_gaps(
             ]
             sub_transcript = " ".join(sub_transcript_words).strip()
 
+            # Slice word_timings from the parent segment for this sub-range
+            sub_word_timings = [
+                wt for wt in seg.word_timings
+                if wt.get("start", 0) >= sub_start - 0.5
+                and wt.get("end", 0) <= sub_end + 0.5
+            ]
+
             sub_seg = EGTSegment(
                 clip_id=sub_clip_id,
                 source_file=seg.source_file,
@@ -492,6 +506,7 @@ def subdivide_by_speech_gaps(
                 end_sec=sub_end,
                 keyframe_path=sub_kf_path if kf_ok else seg.keyframe_path,
                 transcript=sub_transcript,
+                word_timings=sub_word_timings,
                 visual_description=seg.visual_description,  # Inherited until re-analyzed
                 tags=list(seg.tags) + ["speech_gap_split"],
             )
@@ -522,6 +537,8 @@ def editorial_subdivide(
     transcript_segments: List[Dict],
     target_duration: float,
     min_gap_sec: float = 1.0,
+    files_info: List[Dict] = None,
+    job_dir: str = None,
 ) -> list:
     """Subdivide long EGT segments at speech gaps for editorial granularity.
 
@@ -543,18 +560,33 @@ def editorial_subdivide(
             ``{video_file, start, end, text}`` keys.
         target_duration: User-specified target video duration in seconds.
         min_gap_sec: Minimum speech-gap duration to consider as a cut point.
+        files_info: Optional list of dicts from ingest containing cfr_path.
+        job_dir: Optional path to job directory for saving keyframes.
 
     Returns:
         New list of EGTSegment objects with long segments subdivided.
     """
+    import os
     from app.models import EGTSegment, generate_clip_id
+    from app.utils.ffmpeg import extract_keyframe
 
-    max_segment_sec = max(30.0, target_duration * 0.15)
+    # Build cfr_path lookup if files_info is provided
+    proxy_lookup = {}
+    if files_info:
+        for f in files_info:
+            filename = f.get("filename", "")
+            cfr_path = f.get("cfr_path", "")
+            if filename and cfr_path:
+                proxy_lookup[filename] = cfr_path
+
+    max_segment_sec = 8.0
     refined = []
 
     for seg in segments:
         duration = seg.end_sec - seg.start_sec
-        if duration <= max_segment_sec:
+        has_speech = getattr(seg, "has_speech", True)
+        
+        if not has_speech and duration <= max_segment_sec:
             refined.append(seg)
             continue
 
@@ -606,9 +638,18 @@ def editorial_subdivide(
 
         # Greedily pick gap midpoints as split points, prioritizing the longest
         # gaps first, until all resulting sub-segments are within the cap.
-        split_points = _pick_split_points(
-            seg.start_sec, seg.end_sec, gaps, max_segment_sec
-        )
+        has_speech = getattr(seg, "has_speech", True)
+        if has_speech:
+            # FIX 1: For speech, skip duration cap and split at ALL gaps >= min_gap_sec (1.5s effectively based on prompt)
+            # Actually, we just take all gap midpoints. We filter gaps >= 1.5s if requested, but min_gap_sec is used above.
+            split_points = [g[0] + (g[1]-g[0])/2.0 for g in gaps if g[1]-g[0] >= 1.5]
+            if not split_points: # fallback to min_gap_sec if no 1.5s gaps
+                split_points = [g[0] + (g[1]-g[0])/2.0 for g in gaps]
+        else:
+            # For non-speech, apply the duration cap
+            split_points = _pick_split_points(
+                seg.start_sec, seg.end_sec, gaps, max_segment_sec
+            )
 
         if not split_points:
             refined.append(seg)
@@ -634,6 +675,23 @@ def editorial_subdivide(
 
             sub_clip_id = generate_clip_id(seg.source_file, sub_start, sub_end)
 
+            # Extract a new keyframe for this sub-segment at its midpoint
+            new_keyframe_path = seg.keyframe_path  # fallback to parent
+            if job_dir and seg.source_file in proxy_lookup:
+                proxy_video_path = proxy_lookup[seg.source_file]
+                keyframes_dir = os.path.join(job_dir, "keyframes")
+                os.makedirs(keyframes_dir, exist_ok=True)
+                
+                sub_midpoint = sub_start + (sub_end - sub_start) / 2.0
+                kf_filename = f"{sub_clip_id}.jpg"
+                kf_path = os.path.join(keyframes_dir, kf_filename)
+                
+                kf_success = extract_keyframe(proxy_video_path, sub_midpoint, kf_path)
+                if kf_success:
+                    new_keyframe_path = kf_path
+                else:
+                    logger.warning(f"Failed to extract keyframe for sub-segment {sub_clip_id}")
+
             # Slice transcript for this sub-segment
             sub_transcript_words = [
                 t.get("text", "")
@@ -643,15 +701,23 @@ def editorial_subdivide(
             ]
             sub_transcript = " ".join(sub_transcript_words).strip()
 
+            # Slice word_timings from the parent segment for this sub-range
+            sub_word_timings = [
+                wt for wt in seg.word_timings
+                if wt.get("start", 0) >= sub_start - 0.5
+                and wt.get("end", 0) <= sub_end + 0.5
+            ]
+
             sub_seg = EGTSegment(
                 clip_id=sub_clip_id,
                 source_file=seg.source_file,
                 source_file_hash=seg.source_file_hash,
                 start_sec=sub_start,
                 end_sec=sub_end,
-                keyframe_path=seg.keyframe_path,
+                keyframe_path=new_keyframe_path,
                 keyframe_paths=list(seg.keyframe_paths),
                 transcript=sub_transcript,
+                word_timings=sub_word_timings,
                 visual_description=seg.visual_description,
                 tags=list(seg.tags) + ["editorial_split"],
             )

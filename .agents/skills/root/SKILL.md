@@ -19,8 +19,16 @@ description: "The root directory of the VlogForge monorepo. Consult this entry p
   - Global IDE configurations and custom AI agent skills (`.agents/skills`) reside here.
 
 ## 📂 Code Symbols & Key Files
+- **[docker-compose.yml](docker-compose.yml)**: Defines the Postgres database service for the backend.
 - **[environment.yml](environment.yml)**: Conda environment specification. Defines the Python version and major dependencies (FastAPI, PySceneDetect, faster-whisper, google-genai) required for the backend.
 - **[.gitignore](.gitignore)**: Global git ignore rules preventing uploads, outputs, and node_modules from being committed.
+- **[Excalidraw Diagrams](*.excalidraw)**: Various architecture and planning diagrams (`vlogforge-architecture.excalidraw`, `vlogforge-phase-plan.excalidraw`, etc.).
+
+## 🛠️ Workspace Conventions
+- **Code quality**: clean, readable, maintainable; follow Python and React best practices (see `.agents/AGENTS.md`).
+- **Branches**: `feat/…`, `fix/…`, `chore/…`. Do not commit directly to `main`.
+- **Commits**: Conventional Commits — `<type>(<scope>): <subject>` (`feat`, `fix`, `docs`, `refactor`, `test`, `chore`), imperative mood, keep commits atomic.
+- **Hygiene**: never commit scratch/debug artifacts (`*.log`, `*.db`, `.DS_Store`, `patch_*`/`scratch_*`/`dump_*` scripts) or the large local data dirs (`uploads/`, `outputs/`, `logs/`, `test-videos/`, `mocks/`) — all are gitignored.
 
 ## 🌿 Subdirectories & Child Skills
 - **[backend](backend/SKILL.md)**: The Python FastAPI backend — handles video perception, AI reasoning, and FFmpeg assembly.

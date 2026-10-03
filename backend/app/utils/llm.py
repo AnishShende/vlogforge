@@ -4,11 +4,17 @@ import logging
 import time
 import base64
 import re
+import threading
+import concurrent.futures
 import pydantic
 from functools import wraps
 from typing import List, Dict, Optional
 from PIL import Image
 from app.config import settings
+import contextvars
+
+current_job_id = contextvars.ContextVar("current_job_id", default=None)
+job_llm_stats = {}
 
 logger = logging.getLogger("VlogForge.LLM")
 
@@ -65,10 +71,56 @@ def with_gemini_retry(max_retries=5, base_delay=5.0):
         return wrapper
     return decorator
 
+import heapq
+
+class PriorityRateLimiter:
+    def __init__(self, rpm: int):
+        self.rpm = rpm
+        self.interval = 60.0 / rpm if rpm > 0 else 0.0
+        self.last_call = 0.0
+        self.lock = threading.Lock()
+        self.cond = threading.Condition(self.lock)
+        self.waiters = []
+        self.ticket_counter = 0
+
+    def wait(self, priority: int, name: str):
+        if self.rpm <= 0:
+            return
+        with self.cond:
+            ticket = self.ticket_counter
+            self.ticket_counter += 1
+            heapq.heappush(self.waiters, (priority, ticket))
+            
+            logged = False
+            while True:
+                if self.waiters[0] == (priority, ticket):
+                    now = time.time()
+                    elapsed = now - self.last_call
+                    if elapsed >= self.interval:
+                        heapq.heappop(self.waiters)
+                        self.last_call = time.time()
+                        self.cond.notify_all()
+                        return
+                    else:
+                        sleep_time = self.interval - elapsed
+                        if not logged:
+                            logger.info(f"RateLimiter: Queuing '{name}' (priority {priority}) for {sleep_time:.2f}s")
+                            logged = True
+                        self.cond.wait(timeout=sleep_time)
+                else:
+                    if not logged:
+                        logger.info(f"RateLimiter: Queuing '{name}' (priority {priority}) behind {len(self.waiters)-1} call(s)")
+                        logged = True
+                    self.cond.wait()
+
+_rate_limiter = PriorityRateLimiter(settings.gemini_rpm)
+
 @with_gemini_retry(max_retries=5)
-def safe_generate_content(*args, **kwargs):
+def safe_generate_content(*args, priority: int = 1, call_name: str = "LLM Call", **kwargs):
     if not init_gemini():
         raise RuntimeError("Gemini not initialized")
+        
+    _rate_limiter.wait(priority, call_name)
     
     # Extract model name
     model = kwargs.get("model")
@@ -77,14 +129,13 @@ def safe_generate_content(*args, **kwargs):
         
     # Priority list of models to fall back to if daily quota is exceeded or model is missing
     fallbacks = [
-        "gemini-2.5-flash",
-        "gemini-flash-latest",
-        "gemini-flash-lite-latest"
+        model,
+        settings.reasoning_model,
+        settings.perception_model
     ]
+    # Remove duplicates while preserving order
+    fallbacks = list(dict.fromkeys(fallbacks))
     
-    if model not in fallbacks:
-        return _gemini_client.models.generate_content(*args, **kwargs)
-        
     start_idx = fallbacks.index(model)
     
     for idx in range(start_idx, len(fallbacks)):
@@ -97,12 +148,148 @@ def safe_generate_content(*args, **kwargs):
             current_kwargs["model"] = current_model
         elif len(current_args) > 0:
             current_args[0] = current_model
+
+        # --- MOCK LAYER ---
+        cache_key = None
+        cache_file = None
+        is_mock = False
+        if getattr(settings, "enable_mock_llm", False):
+            import hashlib, re
+            # Try to build a stable cache key
+            raw_contents = current_kwargs.get("contents")
+            if not raw_contents and len(current_args) > 1:
+                raw_contents = current_args[1]
+                
+            # Stabilize contents (strip memory addresses, normalize paths)
+            stable_parts = []
+            if not isinstance(raw_contents, list):
+                raw_contents = [raw_contents]
+            for item in raw_contents:
+                if hasattr(item, "filename") and getattr(item, "filename", None):
+                    stable_parts.append(os.path.basename(item.filename))
+                elif "PIL" in str(type(item)):
+                    stable_parts.append("PIL_IMAGE")
+                else:
+                    item_str = re.sub(r"0x[0-9a-fA-F]+", "0xADDR", str(item))
+                    stable_parts.append(item_str)
+            contents_str = "|".join(stable_parts)
             
+            cache_key = hashlib.sha256(f"{current_model}_{contents_str}".encode()).hexdigest()
+            cache_file = os.path.join(settings.mock_llm_dir, f"{call_name.replace(' ', '_')}_{cache_key}.json")
+            
+            job_id = current_job_id.get()
+            if job_id and job_id not in job_llm_stats:
+                job_llm_stats[job_id] = {"real": 0, "mocked": 0}
+            
+            if os.path.exists(cache_file):
+                try:
+                    with open(cache_file, "r") as f:
+                        cached_data = json.load(f)
+                    class MockResponse:
+                        def __init__(self, text):
+                            self.text = text
+                    logger.info(f"[MOCKED LLM CALL] Replaying {call_name} (Model: {current_model})")
+                    if job_id:
+                        job_llm_stats[job_id]["mocked"] += 1
+                    return MockResponse(cached_data.get("text", ""))
+                except Exception as e:
+                    logger.warning(f"Failed to read mock cache {cache_file}: {e}")
+            else:
+                logger.info(f"[REAL LLM CALL] Cache miss for {call_name}. Calling API...")
+                
         try:
-            return _gemini_client.models.generate_content(*current_args, **current_kwargs)
+            if current_model.startswith("claude"):
+                import anthropic, base64, io
+                claude_client = anthropic.Anthropic(api_key=settings.claude_api_key)
+                
+                # Extract text and images
+                claude_content = []
+                raw_contents = current_kwargs.get("contents", [])
+                if not raw_contents and len(current_args) > 1:
+                    raw_contents = current_args[1]
+                if not isinstance(raw_contents, list):
+                    raw_contents = [raw_contents]
+                    
+                for item in raw_contents:
+                    if isinstance(item, str):
+                        claude_content.append({"type": "text", "text": item})
+                    elif "PIL" in str(type(item)):
+                        # Convert PIL Image to base64 JPEG
+                        buffered = io.BytesIO()
+                        # If it's RGBA, convert to RGB for JPEG
+                        if getattr(item, "mode", "RGB") == "RGBA":
+                            item = item.convert("RGB")
+                        item.save(buffered, format="JPEG")
+                        img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+                        claude_content.append({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": img_b64
+                            }
+                        })
+                
+                config = current_kwargs.get("config")
+                schema = getattr(config, "response_schema", None) if config else None
+                
+                if schema:
+                    # Enforce JSON Schema via tool calling
+                    schema_dict = schema.model_json_schema()
+                    msg = claude_client.messages.create(
+                        model=current_model,
+                        max_tokens=4096,
+                        tools=[{
+                            "name": "generate_response",
+                            "description": "Output the required JSON data.",
+                            "input_schema": schema_dict
+                        }],
+                        tool_choice={"type": "auto"},
+                        messages=[{"role": "user", "content": claude_content}]
+                    )
+                    logger.info(f"RAW Claude Message Object: {msg}")
+                    tool_call = next((b for b in msg.content if b.type == "tool_use"), None)
+                    response_text = json.dumps(tool_call.input) if tool_call else "{}"
+                else:
+                    msg = claude_client.messages.create(
+                        model=current_model,
+                        max_tokens=4096,
+                        messages=[{"role": "user", "content": claude_content}]
+                    )
+                    response_text = "\n".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+                
+                class ClaudeMockResponse:
+                    @property
+                    def text(self):
+                        return response_text
+                        
+                response = ClaudeMockResponse()
+            else:
+                response = _gemini_client.models.generate_content(*current_args, **current_kwargs)
+            
+            # Verify the response has valid text before caching (don't cache safety blocks/errors)
+            try:
+                response_text = response.text
+                has_text = True
+            except Exception:
+                has_text = False
+
+            if getattr(settings, "enable_mock_llm", False) and cache_file and has_text:
+                try:
+                    os.makedirs(settings.mock_llm_dir, exist_ok=True)
+                    with open(cache_file, "w") as f:
+                        json.dump({"text": response_text}, f, indent=2)
+                except Exception as e:
+                    logger.warning(f"Failed to write mock cache {cache_file}: {e}")
+            
+            job_id = current_job_id.get()
+            if job_id and getattr(settings, "enable_mock_llm", False):
+                job_llm_stats[job_id]["real"] += 1
+                    
+            return response
         except Exception as e:
             err_str = str(e)
-            is_daily_quota = "quota" in err_str.lower() and ("perday" in err_str.lower() or "free_tier_requests" in err_str.lower())
+            is_daily_quota = "quota" in err_str.lower() and ("per day" in err_str.lower() or "perday" in err_str.lower() or "per_day" in err_str.lower())
             is_not_found = "404" in err_str or "not_found" in err_str.lower()
             if (is_daily_quota or is_not_found) and idx < len(fallbacks) - 1:
                 logger.warning(
@@ -155,8 +342,10 @@ def describe_keyframe(image_path: str, context_notes: str = "", classify_content
             prompt += f" Context notes for the vlog: {context_notes}"
             
         response = safe_generate_content(
-            model="gemini-flash-lite-latest",
-            contents=[prompt, img]
+            model=settings.perception_model,
+            contents=[prompt, img],
+            priority=2 if classify_content else 1,
+            call_name="Gap Meaningfulness" if classify_content else "Keyframe Description"
         )
         text = response.text.strip()
 
@@ -175,7 +364,7 @@ def describe_keyframe(image_path: str, context_notes: str = "", classify_content
         return text
     except Exception as e:
         logger.error(f"Gemini multimodal keyframe description failed: {e}")
-        return ("Visual description unavailable due to API error.", True) if classify_content else "Visual description unavailable due to API error."
+        return ("Visual description unavailable due to API error.", False) if classify_content else "Visual description unavailable due to API error."
 
 def describe_keyframes_batch(items: List[Dict], context_notes: str = "") -> Dict[str, str]:
     """Describe a batch of keyframe images using Gemini Multimodal in a single API call."""
@@ -215,8 +404,10 @@ def describe_keyframes_batch(items: List[Dict], context_notes: str = "") -> Dict
             
         contents = [prompt] + images
         response = safe_generate_content(
-            model="gemini-flash-lite-latest",
+            model=settings.perception_model,
             contents=contents,
+            priority=1,
+            call_name="Batch Keyframe Description",
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=BatchDescSchema
@@ -266,8 +457,10 @@ def synthesize_context(transcripts: List[Dict], visual_descriptions: List[str], 
         )
         
         response = safe_generate_content(
-            model="gemini-flash-lite-latest",
-            contents=prompt
+            model=settings.perception_model,
+            contents=prompt,
+            priority=1,
+            call_name="Context Synthesis"
         )
         return response.text.strip()
     except Exception as e:
@@ -375,8 +568,10 @@ def classify_segments(context_doc: str, scenes: List[Dict], full_scenes: Optiona
 
             try:
                 response = safe_generate_content(
-                    model="gemini-flash-lite-latest",
+                    model=settings.perception_model,
                     contents=prompt,
+                    priority=1,
+                    call_name="Segment Classification",
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json"
                     )
@@ -474,11 +669,11 @@ def _mock_classify_segments(scenes: List[Dict]) -> List[Dict]:
         
     return classified
 
-def transcribe_audio_gemini(audio_path: str) -> List[Dict]:
+def transcribe_audio_gemini(audio_path: str) -> Optional[List[Dict]]:
     """Transcribe an audio file using Gemini 2.5 Flash STT."""
     if not init_gemini():
         logger.warning("Gemini not initialized. Skipping Gemini STT.")
-        return []
+        return None
 
     uploaded_file = None
     try:
@@ -503,8 +698,10 @@ def transcribe_audio_gemini(audio_path: str) -> List[Dict]:
         
         logger.info("Requesting transcription from Gemini 1.5 Flash Lite...")
         response = safe_generate_content(
-            model="gemini-flash-lite-latest",
+            model=settings.perception_model,
             contents=[prompt, uploaded_file],
+            priority=1,
+            call_name="Gemini STT",
             config=types.GenerateContentConfig(
                 response_mime_type="application/json"
             )
@@ -522,7 +719,7 @@ def transcribe_audio_gemini(audio_path: str) -> List[Dict]:
             
     except Exception as e:
         logger.error(f"Gemini 1.5 Flash Lite STT transcription failed: {e}")
-        return []
+        return None
     finally:
         if uploaded_file is not None:
             try:
@@ -572,8 +769,10 @@ def sequence_edl_segments(scenes: List[Dict], context_doc: str) -> List[Dict]:
         
         logger.info(f"Requesting narrative sequencing from Gemini for {len(middle)} clips...")
         response = safe_generate_content(
-            model="gemini-flash-lite-latest",
+            model=settings.perception_model,
             contents=prompt,
+            priority=1,
+            call_name="EDL Sequencing",
             config=types.GenerateContentConfig(
                 response_mime_type="application/json"
             )
@@ -661,8 +860,10 @@ def select_reel_segments_llm(scenes: List[Dict], target_duration: float, context
         
         logger.info(f"Requesting reel selection and sequencing from Gemini for {len(candidates)} candidates...")
         response = safe_generate_content(
-            model="gemini-flash-lite-latest",
+            model=settings.perception_model,
             contents=prompt,
+            priority=1,
+            call_name="Reel Selection",
             config=types.GenerateContentConfig(
                 response_mime_type="application/json"
             )
@@ -725,8 +926,10 @@ def classify_egt_segments(segments: List[Dict], context_doc: str, progress_callb
 
             try:
                 response = safe_generate_content(
-                    model="gemini-flash-lite-latest",
+                    model=settings.perception_model,
                     contents=prompt,
+                    priority=1,
+                    call_name="Semantic Classification",
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
                         response_schema=SegmentClassification,
@@ -737,7 +940,7 @@ def classify_egt_segments(segments: List[Dict], context_doc: str, progress_callb
                 # Update the segment dict
                 seg["segment_type"] = data.get("segment_type", "SPEECH")
                 seg["structural_cue"] = data.get("structural_cue")
-                seg["perception_model"] = "gemini-flash-lite-latest"
+                seg["perception_model"] = settings.perception_model
             except pydantic.ValidationError as e:
                 logger.warning(f"Failed to classify segment {seg.get('clip_id')}: {e}")
                 # keep rule-based type fallback signaling
@@ -819,8 +1022,10 @@ def classify_egt_segments_batch(
             )
             try:
                 response = safe_generate_content(
-                    model="gemini-flash-lite-latest",
+                    model=settings.perception_model,
                     contents=prompt,
+                    priority=1,
+                    call_name="Batch Semantic Classification",
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
                         response_schema=BatchClassificationSchema,
@@ -833,7 +1038,7 @@ def classify_egt_segments_batch(
                     if clip_id in seg_by_id:
                         seg_by_id[clip_id]["segment_type"] = item.get("segment_type", "SPEECH")
                         seg_by_id[clip_id]["structural_cue"] = item.get("structural_cue")
-                        seg_by_id[clip_id]["perception_model"] = "gemini-flash-lite-latest (batch)"
+                        seg_by_id[clip_id]["perception_model"] = f"{settings.perception_model} (batch)"
                     else:
                         logger.warning(f"Batch classification returned unknown clip_id: {clip_id!r}")
                 with progress_lock:
@@ -860,8 +1065,10 @@ def classify_egt_segments_batch(
                             structural_cue: Optional[str]
 
                         resp = safe_generate_content(
-                            model="gemini-flash-lite-latest",
+                            model=settings.perception_model,
                             contents=fallback_prompt,
+                            priority=1,
+                            call_name="Semantic Classification (Fallback)",
                             config=types.GenerateContentConfig(
                                 response_mime_type="application/json",
                                 response_schema=SegmentClassification,
@@ -871,7 +1078,7 @@ def classify_egt_segments_batch(
                         fd = json.loads(resp.text.strip())
                         seg["segment_type"] = fd.get("segment_type", "SPEECH")
                         seg["structural_cue"] = fd.get("structural_cue")
-                        seg["perception_model"] = "gemini-flash-lite-latest (fallback)"
+                        seg["perception_model"] = f"{settings.perception_model} (fallback)"
                     except Exception as fb_err:
                         logger.warning(f"Per-segment fallback also failed for {seg.get('clip_id')}: {fb_err}")
                         seg["perception_model"] = "rule-based-v0"
@@ -916,7 +1123,7 @@ def generate_edl_llm(egt_json: Dict, target_duration: Optional[float] = None, us
             sequence_index: int = pydantic.Field(description="0-indexed position in final timeline")
 
         class EDLSchema(pydantic.BaseModel):
-            chain_of_thought: str = pydantic.Field(description="Think step-by-step about which clips are redundant/bad takes, and explain any micro-trimming of start_sec/end_sec you perform based on the visual timeline.")
+            editorial_rationale: str = pydantic.Field(description="Think step-by-step about which clips are redundant/bad takes, and explain any micro-trimming of start_sec/end_sec you perform based on the visual timeline.")
             edl: List[EDLEntrySchema]
 
         prompt = (
@@ -935,37 +1142,23 @@ def generate_edl_llm(egt_json: Dict, target_duration: Optional[float] = None, us
             "   - `CRITICAL`: Clips you explicitly reason about wanting to preserve for narrative flow, humor, emotional impact, or mandatory anchors (intros, outros, explicit cues like 'look at this'). These can NEVER be dropped by downstream systems.\n"
             "   - `MEDIUM`: Standard speech or action that advances the storyline but could be trimmed if needed.\n"
             "   - `LOW`: Purely filler, B-roll, or highly redundant takes that can be safely dropped if the video budget is tight.\n"
-            "8. CRITICAL-TAGGING CONSISTENCY RULE: If your chain-of-thought reasoning mentions wanting to 'preserve', 'keep', 'retain', or 'not cut' a clip — for ANY reason (narrative flow, humor, emotional beat, important context) — you MUST tag that clip as CRITICAL, not MEDIUM. A clip described as important in your reasoning but tagged MEDIUM is a contradiction that WILL cause the clip to be deleted by downstream budget enforcement.\n"
+            "8. CRITICAL-TAGGING CONSISTENCY RULE: If your chain-of-thought reasoning mentions wanting to 'preserve', 'keep', 'retain', or 'not cut' a clip — for ANY reason (narrative flow, humor, emotional beat, important context) — you MUST tag that clip as CRITICAL, not MEDIUM. A clip described as important in your reasoning but tagged MEDIUM is a contradiction.\n"
         )
 
-        # Inject budget constraint if target_duration is provided
+        # Inject soft duration guidance if target_duration is provided
         if target_duration:
-            budget_tolerance = 0.10
-            min_budget = target_duration * (1.0 - budget_tolerance)
-            max_budget = target_duration * (1.0 + budget_tolerance)
-            
-            # Compute structural duration (intro/outro) from EGT
-            structural_dur = 0.0
-            for seg in egt_json.get("segments", []):
-                if seg.get("segment_type") in ["INTRO", "OUTRO"]:
-                    structural_dur += (seg.get("end_sec", 0) - seg.get("start_sec", 0))
-                    
-            main_content_budget = max(10.0, max_budget - structural_dur)
-            
             prompt += (
-                f"9. DURATION BUDGET (HARD CONSTRAINT): Your final EDL MUST total between "
-                f"{min_budget:.0f}s and {max_budget:.0f}s. Based on the EGT, intros and outros "
-                f"total ~{structural_dur:.0f}s, leaving you with a maximum of ~{main_content_budget:.0f}s "
-                f"remaining for the MAIN content. Pace your story accordingly. Calculate the sum of "
-                f"(end_sec - start_sec) for every clip you include. If the total exceeds {max_budget:.0f}s, "
-                f"you MUST aggressively trim clips using core_start_sec/core_end_sec micro-trimming, or drop "
-                f"the least essential LOW/MEDIUM segments. Do NOT rely on downstream systems to fix budget "
-                f"overages — your EDL is the plan. Allocate intro and outro duration based purely on what the "
-                f"content warrants, not by fixed percentages.\n"
+                f"9. DURATION TARGET (SOFT GUIDANCE): Aim for a final cut around "
+                f"{target_duration:.0f}s. Prioritize story-contributing material over hitting "
+                f"this number exactly — it's a creative target, not a hard limit. If the raw "
+                f"footage contains compelling content that would push the total slightly over "
+                f"or under, that's fine. Use your editorial judgment to pace the story well "
+                f"rather than mechanically trimming to hit an exact number.\n"
             )
             next_rule = 10
         else:
             next_rule = 9
+
 
         if user_prompt:
             prompt += f"{next_rule}. USER INSTRUCTION: '{user_prompt}'. Prioritize content that matches this instruction.\n"
@@ -977,10 +1170,12 @@ def generate_edl_llm(egt_json: Dict, target_duration: Optional[float] = None, us
         )
 
 
-        logger.info("Requesting Phase 1 Reasoning from gemini-2.5-flash...")
+        logger.info(f"Requesting Phase 1 Reasoning from {settings.reasoning_model}...")
         response = safe_generate_content(
-            model="gemini-2.5-flash",
+            model=settings.reasoning_model,
             contents=prompt,
+            priority=0,
+            call_name="EDL Map Reasoning",
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=EDLSchema,
@@ -988,8 +1183,11 @@ def generate_edl_llm(egt_json: Dict, target_duration: Optional[float] = None, us
             )
         )
         
-        data = json.loads(response.text.strip())
-        logger.info(f"Phase 1 Reasoning CoT: {data.get('chain_of_thought', '')}")
+        raw_text = response.text.strip() if response and hasattr(response, 'text') else str(response)
+        logger.info(f"RAW Phase 1 Reasoning response text: {raw_text}")
+        
+        data = json.loads(raw_text)
+        logger.info(f"Phase 1 Reasoning CoT: {data.get('editorial_rationale', '')}")
         return data
         
     except Exception as e:
@@ -1057,6 +1255,8 @@ def generate_edl_reduce_llm(
         response = safe_generate_content(
             model=settings.reasoning_model,
             contents=prompt,
+            priority=0,
+            call_name="EDL Reduce Reasoning",
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=EDLReduceSchema,

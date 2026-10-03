@@ -7,7 +7,10 @@ This module replaces the former classify.py which used LLM-based editorial judgm
     quality_score: calibrated absolute  (0.0–1.0, not relative ranking)
     is_bad_take:   quality_score < threshold
 
-No LLM calls. All classification is rule-based or signal-based.
+Classification priority:
+    1. JEV System One (if TYPESAFE_API_KEY is set) — typed probabilities, ~100ms
+    2. Gemini Flash Lite batch classification (if JEV unavailable)
+    3. Rule-based heuristics (if both AI systems fail)
 """
 
 import re
@@ -17,6 +20,16 @@ from typing import List
 from app.models import EGTSegment
 from app.config import settings
 from app.utils.llm import classify_egt_segments, classify_egt_segments_batch
+from app.utils.jev import (
+    jev_available,
+    classify_segments_jev_batch,
+    BAD_TAKE_NOUL_THRESHOLD,
+    BACKGROUND_NOISE_NOUL_THRESHOLD,
+    STRUCTURAL_CUE_NOUL_THRESHOLD,
+    JEV_QUALITY_WEIGHT,
+    RULE_QUALITY_WEIGHT,
+    QUALITY_SCORE_LEVELS,
+)
 
 logger = logging.getLogger("VlogForge.Score")
 
@@ -202,6 +215,105 @@ def compute_quality_score(segment: EGTSegment) -> tuple:
     return score, flags
 
 
+def _apply_jev_results(
+    segments: List[EGTSegment],
+    jev_results: list,
+    total_duration: float,
+    quality_threshold: float,
+) -> List[EGTSegment]:
+    """Merge JEV classification results into EGT segments.
+
+    For segments where JEV succeeded, blend JEV's content_quality Score
+    with rule-based heuristic signals. For segments where JEV returned None,
+    fall through to rule-based classification.
+
+    JEV provides:
+        - segment_type (Choice) — replaces Gemini classification
+        - is_bad_take (Noul) — replaces keyword-list detection
+        - is_background_noise (Noul) — replaces regex pattern matching
+        - content_quality (Score 0-4, normalized to 0.0-1.0) — blended with heuristics
+        - has_structural_cue (Noul) — detects narrative transitions
+    """
+    bad_take_count = 0
+
+    for idx, (seg, jev) in enumerate(zip(segments, jev_results)):
+        if jev is not None:
+            # === JEV succeeded: use its typed outputs ===
+            seg.segment_type = jev["segment_type"]
+            seg.perception_model = jev["perception_model"]
+
+            # Structural cue: JEV can't generate text, but it tells us if one exists
+            if jev["has_structural_cue_noul"] > STRUCTURAL_CUE_NOUL_THRESHOLD:
+                seg.structural_cue = "detected_by_jev"
+
+            # Quality scoring: blend JEV Score with rule-based heuristics
+            _, rule_flags = compute_quality_score(seg)
+            rule_score_raw = 1.0
+            # Recompute a lightweight rule score from the flags
+            for flag in rule_flags:
+                if flag == "very_short":
+                    rule_score_raw -= 0.30
+                elif flag == "short":
+                    rule_score_raw -= 0.10
+                elif flag == "short_speech_fragment":
+                    rule_score_raw -= 0.70
+                elif flag == "high_disfluency":
+                    rule_score_raw -= 0.35
+                elif flag == "moderate_disfluency":
+                    rule_score_raw -= 0.15
+                elif flag == "only_disfluencies":
+                    rule_score_raw -= 0.25
+                elif flag == "bad_take_phrase":
+                    rule_score_raw -= 0.30
+                elif flag == "low_audio":
+                    rule_score_raw -= 0.25
+                elif flag == "background_noise":
+                    rule_score_raw -= 0.15
+                elif flag == "low_speech_density":
+                    rule_score_raw -= 0.15
+            rule_score_raw = max(0.0, min(1.0, rule_score_raw))
+
+            # Blend: 70% JEV, 30% rule-based
+            blended_score = (
+                JEV_QUALITY_WEIGHT * jev["content_quality_normalized"]
+                + RULE_QUALITY_WEIGHT * rule_score_raw
+            )
+
+            # Apply JEV-specific flags
+            quality_flags = list(rule_flags)  # start with rule-based flags
+
+            if jev["is_bad_take_noul"] > BAD_TAKE_NOUL_THRESHOLD:
+                if "jev_bad_take" not in quality_flags:
+                    quality_flags.append("jev_bad_take")
+                # Bad take penalty on the blended score
+                blended_score = min(blended_score, 0.25)
+
+            if jev["is_background_noise_noul"] > BACKGROUND_NOISE_NOUL_THRESHOLD:
+                if "jev_background_noise" not in quality_flags:
+                    quality_flags.append("jev_background_noise")
+
+            seg.quality_score = round(max(0.0, min(1.0, blended_score)), 3)
+            seg.quality_flags = quality_flags
+
+        else:
+            # === JEV failed: fallback to rule-based classification ===
+            seg.perception_model = "rule-based-v0"
+            seg.segment_type = classify_segment_type(seg, total_duration, idx, len(segments))
+
+            score, flags = compute_quality_score(seg)
+            seg.quality_score = round(score, 3)
+            seg.quality_flags = flags
+
+        # Determine bad-take status
+        seg.is_bad_take = seg.quality_score < quality_threshold
+        if seg.is_bad_take:
+            if "bad_take" not in seg.quality_flags:
+                seg.quality_flags.append("bad_take")
+            bad_take_count += 1
+
+    return segments, bad_take_count
+
+
 def score_segments(
     segments: List[EGTSegment],
     total_duration: float,
@@ -211,10 +323,10 @@ def score_segments(
 ) -> List[EGTSegment]:
     """Score and classify all EGT segments.
 
-    Phase 1 Update:
-    1. Assign segment_type and structural_cue using Gemini Flash Lite.
-    2. Compute absolute quality_score + quality_flags using rule-based SNR heuristics.
-    3. Set is_bad_take based on config.quality_threshold.
+    Classification priority:
+    1. JEV System One (if available) — typed probabilities, ~100ms per segment
+    2. Gemini Flash Lite batch classification (if JEV unavailable)
+    3. Rule-based heuristics (if both AI systems fail)
 
     Returns the same list of EGTSegment objects, mutated in place.
     """
@@ -224,42 +336,57 @@ def score_segments(
         f"(quality_threshold={threshold:.2f})..."
     )
 
-    bad_take_count = 0
+    # === Path 1: JEV System One (preferred) ===
+    if jev_available():
+        logger.info("JEV available — using TypeSafe System One for classification.")
+        segment_dicts = [seg.model_dump() for seg in segments]
+        jev_results = classify_segments_jev_batch(
+            segment_dicts, context_doc=context_doc,
+            progress_callback=progress_callback,
+        )
 
-    # Step 1: Semantic Classification via LLM (M4: batch path for scale)
-    # We pass the segments as dicts to the LLM, then merge back the results.
-    # classify_egt_segments_batch fires progress_callback per-batch (N/10 calls),
-    # which keeps the WebSocket progress bar alive during long jobs.
-    segment_dicts = [seg.model_dump() for seg in segments]
-    classified_dicts = classify_egt_segments_batch(
-        segment_dicts, context_doc, progress_callback=progress_callback
-    )
-    
-    # Merge results
-    for idx, (seg, classified) in enumerate(zip(segments, classified_dicts)):
-        # Apply semantic classification
-        seg.segment_type = classified.get("segment_type", "SPEECH")
-        seg.structural_cue = classified.get("structural_cue")
-        
-        perception_model = classified.get("perception_model", "")
-        # If semantic classification wasn't run (uninitialized) or explicitly failed, fallback
-        if not perception_model or perception_model == "rule-based-v0":
-            seg.perception_model = "rule-based-v0"
-            seg.segment_type = classify_segment_type(seg, total_duration, idx, len(segments))
-        else:
-            seg.perception_model = perception_model
+        # Count how many JEV succeeded
+        jev_success = sum(1 for r in jev_results if r is not None)
+        logger.info(f"JEV classified {jev_success}/{len(segments)} segments successfully.")
 
-        # Step 2: Compute quality score (still rule-based for audio SNR)
-        score, flags = compute_quality_score(seg)
-        seg.quality_score = round(score, 3)
-        seg.quality_flags = flags
+        segments, bad_take_count = _apply_jev_results(
+            segments, jev_results, total_duration, threshold
+        )
+    else:
+        # === Path 2: Gemini batch classification (fallback) ===
+        logger.info("JEV unavailable — falling back to Gemini batch classification.")
+        bad_take_count = 0
 
-        # Step 3: Determine bad-take status
-        seg.is_bad_take = seg.quality_score < threshold
-        if seg.is_bad_take:
-            if "bad_take" not in seg.quality_flags:
-                seg.quality_flags.append("bad_take")
-            bad_take_count += 1
+        segment_dicts = [seg.model_dump() for seg in segments]
+        classified_dicts = classify_egt_segments_batch(
+            segment_dicts, context_doc, progress_callback=progress_callback
+        )
+
+        # Merge results
+        for idx, (seg, classified) in enumerate(zip(segments, classified_dicts)):
+            # Apply semantic classification
+            seg.segment_type = classified.get("segment_type", "SPEECH")
+            seg.structural_cue = classified.get("structural_cue")
+
+            perception_model = classified.get("perception_model", "")
+            # If semantic classification wasn't run or explicitly failed, fallback
+            if not perception_model or perception_model == "rule-based-v0":
+                seg.perception_model = "rule-based-v0"
+                seg.segment_type = classify_segment_type(seg, total_duration, idx, len(segments))
+            else:
+                seg.perception_model = perception_model
+
+            # Compute quality score (rule-based)
+            score, flags = compute_quality_score(seg)
+            seg.quality_score = round(score, 3)
+            seg.quality_flags = flags
+
+            # Determine bad-take status
+            seg.is_bad_take = seg.quality_score < threshold
+            if seg.is_bad_take:
+                if "bad_take" not in seg.quality_flags:
+                    seg.quality_flags.append("bad_take")
+                bad_take_count += 1
 
     logger.info(
         f"Scoring complete. "

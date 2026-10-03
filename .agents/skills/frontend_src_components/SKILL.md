@@ -7,6 +7,8 @@ description: "React UI components for VlogForge — upload panel, real-time proc
 
 ## 📌 Purpose & Responsibility
 - Contains all **leaf-level React components** that build the VlogForge UI.
+- `Dashboard.jsx`: Main hub after login, displaying the user's projects.
+- `auth/Login.jsx` & `auth/Register.jsx`: User authentication forms.
 - `UploadPanel.jsx`: Drag-and-drop video file picker with duplicate deduplication, per-file duration calculation, and file size display.
 - `ProcessingMonitor.jsx`: Real-time WebSocket progress display with a circular SVG progress ring and a stage-by-stage status list. Exposes cancel functionality.
 - `VideoPreview.jsx`: The **primary post-processing interface** — a full NLE-style review editor. Contains the assembled video player, original footage switcher, drag-reorderable EDL timeline, per-segment quality inspector (transcript, quality score, flags, tags), and quality threshold re-reasoning controls.
@@ -30,6 +32,10 @@ description: "React UI components for VlogForge — upload panel, real-time proc
   - `VideoPreview` implements `segmentsMatch()` to correlate EDL entries with EGT transcript segments (supports both legacy and new EDL field name conventions).
 
 ## 📂 Code Symbols & Key Files
+
+- [Dashboard.jsx](frontend/src/components/Dashboard.jsx): Displays a grid of user projects fetched from `/api/projects`, allowing creation and deletion of projects. Includes sidebar navigation.
+
+- [Login.jsx](frontend/src/components/auth/Login.jsx) / [Register.jsx](frontend/src/components/auth/Register.jsx): Authentication forms that communicate with `/api/auth` endpoints and store JWT tokens in localStorage.
 
 - [UploadPanel.jsx](frontend/src/components/UploadPanel.jsx): Drag-and-drop zone built with `react-dropzone`. Reads video duration client-side via a hidden `<video>` element. Deduplications by `(name, size)` key. Accepts `.mp4 .mov .avi .mkv`.
 

@@ -85,12 +85,16 @@ def analyze_segments(
 
     # Step 2: Batch LLM calls
     from app.utils.llm import describe_keyframes_batch
-    batch_size = 30
+    batch_size = getattr(settings, "visual_batch_size", 20)
     descriptions_map = {}
     
-    total_batches = max(1, (len(llm_items) + batch_size - 1) // batch_size)
-    for i in range(0, len(llm_items), batch_size):
-        batch = llm_items[i:i+batch_size]
+    # Skip vision API calls for segments with speech
+    non_speech_seg_ids = {s.clip_id for s in segments if not s.has_speech}
+    filtered_llm_items = [item for item in llm_items if item["seg_id"] in non_speech_seg_ids]
+
+    total_batches = max(1, (len(filtered_llm_items) + batch_size - 1) // batch_size)
+    for i in range(0, len(filtered_llm_items), batch_size):
+        batch = filtered_llm_items[i:i+batch_size]
         batch_num = (i // batch_size) + 1
         logger.info(f"Describing visual batch {batch_num}/{total_batches} ({len(batch)} keyframes)...")
         batch_results = describe_keyframes_batch(batch, user_context)
@@ -103,16 +107,17 @@ def analyze_segments(
             seg_descs = []
             for item in llm_items:
                 if item["seg_id"] == seg.clip_id:
-                    desc = descriptions_map.get(item["clip_id"], "Visual description unavailable.")
-                    rel_t = item["time"] - seg.start_sec
-                    seg_descs.append(f"[{rel_t:.1f}s] {desc}")
+                    desc = descriptions_map.get(item["clip_id"], "")
+                    if desc:
+                        rel_t = item["time"] - seg.start_sec
+                        seg_descs.append(f"[{rel_t:.1f}s] {desc}")
                     
             if seg_descs:
                 seg.visual_description = "Timeline: " + " | ".join(seg_descs)
             else:
-                seg.visual_description = "Visual description unavailable."
+                seg.visual_description = ""
         else:
-            seg.visual_description = descriptions_map.get(seg.clip_id, "Visual description unavailable.")
+            seg.visual_description = descriptions_map.get(seg.clip_id, "")
 
     # Step 2: Extract tags from description (rule-based, no LLM)
     for seg in segments:

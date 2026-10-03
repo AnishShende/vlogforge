@@ -50,7 +50,9 @@ class EGTSegment(BaseModel):
 
     # === Transcript ===
     transcript: str = ""                                # Aligned speech content
+    word_timings: List[Dict] = Field(default_factory=list)  # [{word, start, end}, ...] from Whisper
     language_id: str = "en"                             # ISO 639-1 (future: "hi", "hi-en")
+    has_speech: bool = False                            # Indicates >= 3 words in transcript
 
     # === Visual ===
     visual_description: str = ""                        # Short text from vision model
@@ -62,6 +64,9 @@ class EGTSegment(BaseModel):
     quality_score: float = 1.0                          # 0.0–1.0, calibrated absolute
     quality_flags: List[str] = Field(default_factory=list)  # ["low_audio", "shaky", "overexposed", "bad_take"]
     is_bad_take: bool = False                           # Derived: quality_score < threshold
+    is_superseded_take: bool = False                    # Derived: retake detection (length-agnostic clustering)
+    is_stutter_repeat: bool = False                     # Derived: intra-segment repetition
+    repetition_ratio: float = 0.0                       # Computed ratio of repeated n-grams
 
     # === Structural (populated in P0 schema, consumed in Phase 1+) ===
     journey_collection: Optional[str] = None            # "journey" | "collection" | None
@@ -138,6 +143,19 @@ class EDLEntry(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Video Metadata — M5 YouTube Optimization Output
+# ---------------------------------------------------------------------------
+
+class VideoMetadata(BaseModel):
+    """AI-generated YouTube-ready metadata for the final vlog."""
+
+    title: str = ""
+    description: str = ""
+    tags: List[str] = Field(default_factory=list)
+    chapters: List[Dict] = Field(default_factory=list)  # [{"time": "0:00", "label": "Intro"}, ...]
+
+
+# ---------------------------------------------------------------------------
 # Legacy EDL Item — kept for backward compatibility during migration
 # ---------------------------------------------------------------------------
 
@@ -172,6 +190,10 @@ class JobStatus(BaseModel):
     warnings: List[str] = Field(default_factory=list)
     # M4: Pipeline metrics for diagnostics — populated at pipeline completion
     pipeline_metrics: Optional[Dict] = None  # keys: total_segments, chunks_used, raw_footage_sec, edl_path
+    # M5: AI-generated YouTube metadata — populated after assembly
+    metadata: Optional[VideoMetadata] = None
+    # Dev: Indicates if the LLM calls were mocked
+    llm_mode: str = "real"  # "real" | "mocked"
 
 
 class WSProgressEvent(BaseModel):

@@ -387,5 +387,33 @@ def generate_edl(
             "type": s["label"]
         })
         
+    # Deduplicate and clamp overlapping consecutive clips from same source file
+    cleaned_edl = []
+    for item in formatted_edl:
+        if not cleaned_edl:
+            cleaned_edl.append(item)
+            continue
+        prev = cleaned_edl[-1]
+        if item.get("video_file") == prev.get("video_file"):
+            if item["start_sec"] >= prev["start_sec"] and item["end_sec"] <= prev["end_sec"]:
+                continue
+            is_same_cat = (
+                item.get("type") == prev.get("type") or
+                (item.get("type") in ("KEEP", "HIGHLIGHT", "B_ROLL") and prev.get("type") in ("KEEP", "HIGHLIGHT", "B_ROLL"))
+            )
+            if item["start_sec"] < prev["end_sec"]:
+                if is_same_cat:
+                    prev["end_sec"] = max(prev["end_sec"], item["end_sec"])
+                    continue
+                else:
+                    item["start_sec"] = prev["end_sec"]
+                    if item["end_sec"] - item["start_sec"] < 0.2:
+                        continue
+            elif is_same_cat and (0 < item["start_sec"] - prev["end_sec"] <= 0.15):
+                prev["end_sec"] = max(prev["end_sec"], item["end_sec"])
+                continue
+        cleaned_edl.append(item)
+        
+    formatted_edl = cleaned_edl
     logger.info(f"EDL generation complete. Created {len(formatted_edl)} cuts. Total duration: {current_duration:.2f}s")
     return formatted_edl

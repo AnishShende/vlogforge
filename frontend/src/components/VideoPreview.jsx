@@ -462,13 +462,10 @@ export default function VideoPreview({ jobId, downloadUrl, onReset, onReEdit }) 
             {warnings.length > 0 && (
               <div style={{ padding: '0.75rem', background: 'rgba(239, 68, 68, 0.1)', border: '1px solid var(--danger)', borderRadius: 'var(--radius-sm)', marginBottom: '0.5rem' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--danger)', fontSize: '0.8rem', fontWeight: 700, marginBottom: '0.5rem' }}>
-                  <AlertTriangle size={14} /> BUDGET OVERRIDE
+                  <AlertTriangle size={14} /> WARNINGS
                 </div>
                 <div style={{ fontSize: '0.75rem', color: 'var(--text-main)', lineHeight: 1.4 }}>
                   {warnings.map((w, i) => <div key={i} style={{ marginBottom: '0.25rem' }}>{w}</div>)}
-                  <div style={{ marginTop: '0.5rem', fontSize: '0.7rem', color: 'var(--text-muted)' }}>
-                    You can override these cuts by clicking the transcript bubbles to re-add segments.
-                  </div>
                 </div>
               </div>
             )}

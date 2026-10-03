@@ -37,9 +37,12 @@ from app.tasks.transcribe import transcribe_audio, align_transcript_with_segment
 from app.tasks.analyze import analyze_segments
 from app.tasks.score import score_segments, recompute_bad_takes
 from app.tasks.egt import build_egt_document, egt_to_serializable
+from app.tasks.retake_detect import detect_and_resolve_retakes
 from app.tasks.edl import generate_edl
 from app.tasks.assemble import assemble_vlog
+from app.tasks.metadata import generate_metadata
 from app.utils.interaction_logger import interaction_logger
+from app.utils.word_snap import snap_edl_to_word_boundaries
 
 logger = logging.getLogger("VlogForge.Orchestrator")
 
@@ -51,7 +54,20 @@ websockets_db: Dict[str, Set[WebSocket]] = {}
 jobs_data_db: Dict[str, Dict] = {}
 
 def get_job(job_id: str) -> Optional[JobStatus]:
-    return jobs_db.get(job_id)
+    job = jobs_db.get(job_id)
+    if job and getattr(settings, "enable_mock_llm", False):
+        from app.utils.llm import job_llm_stats
+        stats = job_llm_stats.get(job_id, {"real": 0, "mocked": 0})
+        r, m = stats["real"], stats["mocked"]
+        if r > 0 and m > 0:
+            job.llm_mode = f"partial (Real: {r}, Mocked: {m})"
+        elif r > 0:
+            job.llm_mode = f"real ({r} calls)"
+        elif m > 0:
+            job.llm_mode = f"mocked ({m} calls)"
+        else:
+            job.llm_mode = "mocked (waiting)"
+    return job
 
 def get_job_data(job_id: str) -> Optional[Dict]:
     return jobs_data_db.get(job_id)
@@ -127,6 +143,8 @@ async def broadcast_progress(job_id: str, stage: str, progress: int, message: st
 
 def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, target_duration: float = 10.0, vlog_genre: str = "default", quality_threshold: float = 0.35, main_loop: asyncio.AbstractEventLoop = None):
     """Synchronous pipeline run (to be run in a separate thread)."""
+    from app.utils.llm import current_job_id
+    current_job_id.set(job_id)
 
     # Lock to serialize WebSocket broadcasts from concurrent worker threads
     broadcast_lock = threading.Lock()
@@ -283,10 +301,7 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
             settings.long_scene_floor_sec,
             target_duration * settings.long_scene_ratio,
         )
-        dynamic_speech_gap = max(
-            settings.speech_gap_floor_sec,
-            target_duration * settings.speech_gap_ratio,
-        )
+        dynamic_speech_gap = settings.speech_gap_floor_sec
         logger.info(
             f"Dynamic thresholds (target_duration={target_duration:.0f}s): "
             f"long_scene={dynamic_long_scene:.1f}s, speech_gap={dynamic_speech_gap:.1f}s"
@@ -317,6 +332,8 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
             segments=all_segments,
             transcript_segments=full_transcript_segments,
             target_duration=target_duration,
+            files_info=files_info,
+            job_dir=job_dir,
         )
 
         # ---- Stage 3b: Visual Analysis (Keyframe Description + Tags) ----
@@ -367,6 +384,11 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
             source_file_count=total_files,
             total_duration=total_raw_duration,
         )
+        
+        # ---- Stage 5.5: Retake Detection & Resolution ----
+        check_cancelled()
+        safe_broadcast("classifying", 65, "Detecting and clustering retakes...")
+        egt_doc = detect_and_resolve_retakes(egt_doc)
 
         # Store EGT and transcript data
         jobs_data_db[job_id] = {
@@ -391,18 +413,24 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
         )
         safe_broadcast("edl_generating", 65, edl_stage_msg)
 
-        edl, warning = generate_edl(egt_doc, full_transcript_segments, target_duration, context_text)
-        jobs_data_db[job_id]["edl"] = edl
-        if warning:
-            if job_id in jobs_db:
-                jobs_db[job_id].warnings.append(warning)
-            if "warnings" not in jobs_data_db[job_id]:
-                jobs_data_db[job_id]["warnings"] = []
-            jobs_data_db[job_id]["warnings"].append(warning)
-            safe_broadcast("edl_generating", 65, "Generating Edit Decision List... (Warning occurred)")
+        edl, _warning, reasoning_mode = generate_edl(egt_doc, full_transcript_segments, target_duration, context_text)
 
-        # Build set of valid clip_ids for assembly validation
-        egt_clip_ids = {seg.clip_id for seg in all_segments}
+        # ---- Stage 6.5: Word-boundary snap post-pass ----
+        check_cancelled()
+        safe_broadcast("edl_generating", 75, "Snapping cut points to word boundaries...")
+        segments_by_clip_id = {
+            seg.clip_id: seg.model_dump() for seg in all_segments
+        }
+        edl = snap_edl_to_word_boundaries(edl, segments_by_clip_id)
+
+        jobs_data_db[job_id]["edl"] = edl
+        jobs_data_db[job_id]["reasoning_mode"] = reasoning_mode
+
+        # Build set of valid clip_ids for assembly validation (exclude bad/superseded/stutter)
+        egt_clip_ids = {
+            seg.clip_id for seg in all_segments
+            if not seg.is_bad_take and not getattr(seg, "is_superseded_take", False) and not getattr(seg, "is_stutter_repeat", False)
+        }
 
         # ==================================================================
         # PASS 3 — MECHANICAL ASSEMBLY
@@ -430,6 +458,27 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
                 logger.info(f"CFR temp directory cleaned up: {cfr_dir}")
             except Exception as cleanup_err:
                 logger.warning(f"Failed to clean up CFR directory {cfr_dir}: {cleanup_err}")
+
+        # ---- Stage 7.5: Metadata Generation (M5) ----
+        check_cancelled()
+        safe_broadcast("metadata_generating", 92, "Generating YouTube metadata (title, description, tags, chapters)...")
+
+        try:
+            metadata = generate_metadata(
+                context_summary=context_summary,
+                transcript_segments=full_transcript_segments,
+                edl=edl,
+                target_duration=target_duration,
+                user_prompt=context_text,
+            )
+            jobs_data_db[job_id]["metadata"] = metadata
+            if job_id in jobs_db:
+                from app.models import VideoMetadata
+                jobs_db[job_id].metadata = VideoMetadata(**metadata)
+            logger.info(f"M5 metadata generated for job {job_id}.")
+        except Exception as meta_err:
+            logger.warning(f"Metadata generation failed (non-fatal): {meta_err}")
+            # Non-fatal — video is still ready, just without metadata
 
         # ---- Stage 8: Complete ----
         download_url = f"/api/jobs/{job_id}/download"
@@ -521,12 +570,9 @@ def run_re_reasoning_sync(job_id: str, quality_threshold: float, main_loop: asyn
         # Pass through the original job's target_duration and context_text
         job_target_duration = job.target_duration if job else None
         job_context_text = job.context_text if job else ""
-        edl, warning = generate_edl(egt_doc, [], target_duration=job_target_duration, user_prompt=job_context_text)
+        edl, _warning, reasoning_mode = generate_edl(egt_doc, [], target_duration=job_target_duration, user_prompt=job_context_text)
         job_data["edl"] = edl
-        if warning:
-            if "warnings" not in job_data:
-                job_data["warnings"] = []
-            job_data["warnings"].append(warning)
+        job_data["reasoning_mode"] = reasoning_mode
 
         safe_broadcast("assembling", 85, "Assembling video cuts with FFmpeg...")
 
