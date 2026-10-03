@@ -19,7 +19,7 @@ description: "The core AI pipeline task modules for VlogForge — each file impl
 - **Outputs**: An `EGTDocument` (stored in `jobs_data_db`), an EDL list (stored in `jobs_data_db`), and a final `.mp4` file on disk at `settings.output_dir/{job_id}.mp4`.
 - **Interactions**:
   1. `orchestrator.py:start_pipeline()` is called from `main.py`.
-  2. The orchestrator runs `ingest_video()` → `transcribe_audio()` → `subdivide_by_speech_gaps()` → `analyze_segments()` → `score_segments()` → `build_egt_document()` → `generate_edl()` → `assemble_vlog()` in sequence. Note the re-ordering where subdivision happens before visual analysis.
+  2. The orchestrator runs `ingest_video()` → `transcribe_audio()`/`align_transcript_with_segments()` → `subdivide_by_speech_gaps()` → `analyze_segments()` → `score_segments()` → `build_egt_document()` → `detect_and_resolve_retakes()` → `generate_edl()` → `snap_edl_to_word_boundaries()` → `assemble_vlog()` → `generate_metadata()` in sequence. Note the re-ordering where subdivision happens before visual analysis.
   3. At each stage, `broadcast_progress()` pushes WebSocket updates to the frontend via `main.py`'s WebSocket endpoint.
   4. `assemble.py` calls FFmpeg utilities from `app/utils/ffmpeg.py`.
   5. `edl.py` and `score.py` call LLM functions from `app/utils/llm.py`.
@@ -37,6 +37,14 @@ description: "The core AI pipeline task modules for VlogForge — each file impl
 - [score.py](backend/app/tasks/score.py): Phase 1.4 — Quality scoring and segment-type classification. Calls `classify_egt_segments()` (Gemini Flash Lite) for semantic segment_type assignment, then applies 6-signal rule-based heuristics for `quality_score` (disfluency, duration, bad-take phrases, noise, speech density). [recompute_bad_takes](backend/app/tasks/score.py#L268-L289) enables fast threshold re-evaluation without re-running LLMs.
 
 - [egt.py](backend/app/tasks/egt.py): Phase 1.5 — Assembles a validated `EGTDocument` from all perception sub-stages. Runs integrity validation (duplicate clip_ids, invalid timestamps). Provides serialization helpers `egt_to_serializable()` and `egt_from_serializable()`.
+
+- [disfluency.py](backend/app/tasks/disfluency.py): Pass 2a — Word-level disfluency detection. Scores utterances for filler words and self-correction/restart markers. Exposes `compute_utterance_disfluency()`, consumed by `retake_detect.py` and quality scoring.
+
+- [retake_detect.py](backend/app/tasks/retake_detect.py): Detects and resolves repeated takes of the same line. Combines embedding similarity (lazy-loaded model via `get_embedding_model()`), n-gram repetition ratio, and disfluency signals; validates explicit retakes through `check_is_explicit_retake_jev()` (see `utils/jev.py`). Entry point `detect_and_resolve_retakes()` runs after `build_egt_document()` and marks losing takes as bad.
+
+- [word_timeline_redundancy.py](backend/app/tasks/word_timeline_redundancy.py): Word-timeline-level redundancy analysis that builds on `retake_detect.py` and `jev.py` to find and prune repeated content spans across the whole transcript timeline.
+
+- [metadata.py](backend/app/tasks/metadata.py): M5 — Generates YouTube-optimized metadata (title, description, tags, chapters) from the context summary, transcript, and final EDL sequence. Entry point `generate_metadata()`; non-fatal (video still ships if it fails). Surfaced via `GET /api/jobs/{id}/metadata`.
 
 - [edl.py](backend/app/tasks/edl.py): Pass 2 — EDL generation. Implements the 3-Tier Neurosymbolic architecture:
   - **Tier 2 (Propose)**: Calls `generate_edl_llm()` to obtain an ordered EDL with `narrative_priority` (LOW/MEDIUM/CRITICAL) and `core` bounds.

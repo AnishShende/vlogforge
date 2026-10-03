@@ -3,7 +3,7 @@
 Phase 0 constraint: ZERO reasoning. This module performs a purely mechanical
 transformation from EGT → EDL:
 
-    1. Filter out bad takes (is_bad_take == True)
+    1. Filter out bad takes (is_bad_take == True or is_superseded_take == True)
     2. Filter out SILENCE segments
     3. Keep everything else in STRICT chronological order
     4. Position INTRO first, OUTRO last (if detected)
@@ -55,6 +55,97 @@ def _enforce_broll_minimums(entries: List[EDLEntry], segments: List[EGTSegment])
     return entries
 
 
+def _deduplicate_and_clamp_edl_overlaps(entries: List[EDLEntry]) -> List[EDLEntry]:
+    """Clean up and eliminate any time overlaps or redundant repetitions between consecutive clips.
+
+    Ensures that for any consecutive entries referencing the same source video file:
+    1. If entry[i+1] is completely contained inside entry[i], drop it.
+    2. If entry[i+1] overlaps with entry[i] (start_sec < prev_end_sec):
+       - If they share the same editorial category (e.g. both INTRO, both OUTRO, or both KEEP/HIGHLIGHT/B_ROLL),
+         merge them into a single seamless continuous clip.
+       - Otherwise, clamp entry[i+1].start_sec = entry[i].end_sec.
+       - If clamping reduces entry[i+1] to a degenerate sliver (< 0.2s), drop it.
+    3. If entry[i+1] and entry[i] share the same source file and editorial category and have a micro-gap (<= 0.15s),
+       bridge/merge them to eliminate micro-cuts and audio pops.
+    4. Re-assign clean sequential sequence_index.
+    """
+    if not entries:
+        return []
+
+    merged: List[EDLEntry] = []
+
+    for entry in entries:
+        if not merged:
+            merged.append(entry)
+            continue
+
+        prev = merged[-1]
+
+        # Check if they are from the same source video file
+        if entry.source_file == prev.source_file:
+            # Check for complete containment (duplicate / subset)
+            if entry.start_sec >= prev.start_sec and entry.end_sec <= prev.end_sec:
+                logger.debug(
+                    f"Dropping redundant clip {entry.clip_id} [{entry.start_sec:.2f}-{entry.end_sec:.2f}s] "
+                    f"fully contained in prev [{prev.start_sec:.2f}-{prev.end_sec:.2f}s]"
+                )
+                continue
+
+            is_same_category = (
+                (prev.editorial_type == entry.editorial_type)
+                or (
+                    prev.editorial_type in ("KEEP", "HIGHLIGHT", "B_ROLL")
+                    and entry.editorial_type in ("KEEP", "HIGHLIGHT", "B_ROLL")
+                )
+            )
+
+            # Check for overlap: entry starts before previous ends
+            if entry.start_sec < prev.end_sec:
+                overlap_dur = prev.end_sec - entry.start_sec
+                logger.info(
+                    f"Detected {overlap_dur:.2f}s overlap between adjacent clips {prev.clip_id} "
+                    f"[{prev.start_sec:.2f}-{prev.end_sec:.2f}s] and {entry.clip_id} [{entry.start_sec:.2f}-{entry.end_sec:.2f}s]."
+                )
+                if is_same_category:
+                    # Merge into one continuous clip
+                    prev.end_sec = max(prev.end_sec, entry.end_sec)
+                    prev.core_end_sec = max(prev.core_end_sec, entry.core_end_sec)
+                    if entry.narrative_priority == "CRITICAL":
+                        prev.narrative_priority = "CRITICAL"
+                    prev.quality_score = max(prev.quality_score, entry.quality_score)
+                    logger.info(f"Merged into continuous clip: [{prev.start_sec:.2f}-{prev.end_sec:.2f}s]")
+                    continue
+                else:
+                    # Clamp start of current entry to end of previous entry
+                    entry.start_sec = prev.end_sec
+                    if entry.core_start_sec < entry.start_sec:
+                        entry.core_start_sec = entry.start_sec
+                    # If remaining duration is less than 0.2s, skip it
+                    if entry.end_sec - entry.start_sec < 0.2:
+                        logger.debug(f"Dropping clamped degenerate clip {entry.clip_id} (<0.2s duration)")
+                        continue
+            elif is_same_category and (0 < entry.start_sec - prev.end_sec <= 0.15):
+                # Bridge micro-gap between continuous parts
+                logger.debug(
+                    f"Bridging micro-gap ({entry.start_sec - prev.end_sec:.2f}s) between "
+                    f"adjacent clips {prev.clip_id} and {entry.clip_id}"
+                )
+                prev.end_sec = max(prev.end_sec, entry.end_sec)
+                prev.core_end_sec = max(prev.core_end_sec, entry.core_end_sec)
+                if entry.narrative_priority == "CRITICAL":
+                    prev.narrative_priority = "CRITICAL"
+                prev.quality_score = max(prev.quality_score, entry.quality_score)
+                continue
+
+        merged.append(entry)
+
+    # Re-index sequence_index
+    for idx, entry in enumerate(merged):
+        entry.sequence_index = idx
+
+    return merged
+
+
 def snap_boundary_to_speech(
     start: float,
     end: float,
@@ -74,21 +165,33 @@ def snap_boundary_to_speech(
     if not file_segs:
         return start, end
 
-    # Snap start: find the speech segment that starts close to the scene start
-    best_start_diff = 1.5
-    for seg in file_segs:
-        diff = abs(seg["start"] - start)
-        if diff < best_start_diff:
-            if seg["start"] < end - 0.5:
+    # Snap start: if the cut falls inside a speech segment, snap to its nearest edge
+    inside_start_seg = next((s for s in file_segs if s["start"] < start < s["end"]), None)
+    if inside_start_seg:
+        if abs(inside_start_seg["start"] - start) <= abs(inside_start_seg["end"] - start) and inside_start_seg["start"] < end - 0.5:
+            snapped_start = inside_start_seg["start"]
+        elif inside_start_seg["end"] < end - 0.5:
+            snapped_start = inside_start_seg["end"]
+    else:
+        best_start_diff = 3.0
+        for seg in file_segs:
+            diff = abs(seg["start"] - start)
+            if diff < best_start_diff and seg["start"] < end - 0.5:
                 snapped_start = seg["start"]
                 best_start_diff = diff
 
-    # Snap end: find the speech segment that ends close to the scene end
-    best_end_diff = 1.5
-    for seg in file_segs:
-        diff = abs(seg["end"] - end)
-        if diff < best_end_diff:
-            if seg["end"] > snapped_start + 0.5:
+    # Snap end: if the cut falls inside a speech segment, snap to its nearest edge
+    inside_end_seg = next((s for s in file_segs if s["start"] < end < s["end"]), None)
+    if inside_end_seg:
+        if abs(inside_end_seg["end"] - end) <= abs(inside_end_seg["start"] - end) and inside_end_seg["end"] > snapped_start + 0.5:
+            snapped_end = inside_end_seg["end"]
+        elif inside_end_seg["start"] > snapped_start + 0.5:
+            snapped_end = inside_end_seg["start"]
+    else:
+        best_end_diff = 3.0
+        for seg in file_segs:
+            diff = abs(seg["end"] - end)
+            if diff < best_end_diff and seg["end"] > snapped_start + 0.5:
                 snapped_end = seg["end"]
                 best_end_diff = diff
 
@@ -114,11 +217,8 @@ def _validate_priority_consistency(
 
     If the LLM's chain-of-thought reasoning mentions wanting to preserve a
     clip (using preservation keywords) but assigned it MEDIUM or LOW priority,
-    this function upgrades it to CRITICAL. This prevents the Tier 3 enforcer
-    from dropping clips the LLM explicitly reasoned about wanting to keep.
-
-    Also warns if a single clip's core duration exceeds 50% of the total EDL
-    duration and is tagged MEDIUM — a risk signal for destructive drops.
+    this function upgrades it to CRITICAL. This ensures consistency between
+    the LLM's stated editorial intent and the priority tags it assigns.
     """
     if not chain_of_thought:
         return entries
@@ -126,10 +226,9 @@ def _validate_priority_consistency(
     # Split into sentences roughly
     import re
     sentences = re.split(r'(?<=[.!?])\s+', chain_of_thought.lower())
-    total_dur = sum(e.end_sec - e.start_sec for e in entries)
 
     for entry in entries:
-        # Check 1: Does the CoT mention this clip_id with preservation language in a 3-sentence window?
+        # Does the CoT mention this clip_id with preservation language in a 3-sentence window?
         if entry.narrative_priority in ["MEDIUM", "LOW"]:
             clip_id_lower = entry.clip_id.lower()
             
@@ -158,165 +257,10 @@ def _validate_priority_consistency(
                     f"preservation intent but priority was under-tagged."
                 )
 
-        # Check 2: Large clip with weak priority is a risk signal
-        if entry.narrative_priority == "MEDIUM" and total_dur > 0:
-            core_dur = entry.core_end_sec - entry.core_start_sec
-            if core_dur > total_dur * 0.5:
-                logger.warning(
-                    f"Priority risk: Clip {entry.clip_id} is {core_dur:.1f}s "
-                    f"({core_dur/total_dur*100:.0f}% of total) but tagged "
-                    f"MEDIUM. Tier 3 may drop it entirely."
-                )
-
     return entries
 
 
-# ---------------------------------------------------------------------------
-# Proportional Core Trimming — surgical budget reduction
-# ---------------------------------------------------------------------------
 
-_MIN_CLIP_DURATION_SEC = 3.0  # Never trim a clip below this floor
-
-
-def _proportional_core_trim(
-    entries: List,
-    max_allowed: float,
-    priority_filter: List[str],
-) -> List:
-    """Trim eligible clips' core bounds proportionally to their share of the
-    budget excess.
-
-    Instead of dropping entire clips (which causes cliff-edge duration drops
-    like 285s → 24s), this function distributes the excess evenly:
-
-        excess = total_duration - max_allowed
-        per_clip_trim = excess * (clip_duration / total_eligible_duration)
-
-    Each clip loses duration proportional to its size, trimmed from the end
-    of its core bounds. No clip is trimmed below ``_MIN_CLIP_DURATION_SEC``.
-
-    Args:
-        entries: The current EDL entries (mutated in place).
-        max_allowed: Maximum allowed total duration (target + tolerance).
-        priority_filter: Only trim clips matching these priority levels.
-
-    Returns:
-        The same entries list (mutated).
-    """
-    total_dur = sum(e.end_sec - e.start_sec for e in entries)
-    if total_dur <= max_allowed:
-        return entries
-
-    excess = total_dur - max_allowed
-    eligible = [e for e in entries if e.narrative_priority in priority_filter]
-    eligible_dur = sum(e.end_sec - e.start_sec for e in eligible)
-
-    if eligible_dur <= 0:
-        return entries
-
-    for e in eligible:
-        clip_dur = e.end_sec - e.start_sec
-        if clip_dur <= _MIN_CLIP_DURATION_SEC:
-            continue
-
-        # Proportional share of the excess to trim from this clip
-        trim_amount = excess * (clip_dur / eligible_dur)
-
-        # Don't trim below the minimum floor
-        max_trimmable = clip_dur - _MIN_CLIP_DURATION_SEC
-        trim_amount = min(trim_amount, max_trimmable)
-
-        if trim_amount > 0:
-            # Trim from the end of the core bounds
-            e.core_end_sec = max(
-                e.core_start_sec + _MIN_CLIP_DURATION_SEC,
-                e.core_end_sec - trim_amount,
-            )
-            e.end_sec = e.core_end_sec
-            logger.info(
-                f"Proportional trim: Clip {e.clip_id} trimmed by "
-                f"{trim_amount:.1f}s → new duration {e.end_sec - e.start_sec:.1f}s"
-            )
-
-    return entries
-
-
-def _enforce_budget(entries: List[EDLEntry], target_duration: float) -> Tuple[List[EDLEntry], Optional[str]]:
-    """Apply Tier 3 graduated budget enforcement to the EDL entries."""
-    warning_msg = None
-    budget_tolerance = 0.10  # ±10% tolerance band
-    max_allowed = target_duration * (1.0 + budget_tolerance)
-
-    def get_total_dur(edl_list):
-        return sum(e.end_sec - e.start_sec for e in edl_list)
-
-    def is_over_budget(edl_list):
-        return get_total_dur(edl_list) > max_allowed
-
-    # Phase A: Trim padding for LOW and MEDIUM (collapse to core bounds)
-    if is_over_budget(entries):
-        logger.info(f"Tier 3 Phase A: Trimming padding from LOW/MEDIUM clips. Current: {get_total_dur(entries):.1f}s, target: {max_allowed:.1f}s")
-        for e in entries:
-            if e.narrative_priority in ["LOW", "MEDIUM"]:
-                e.start_sec = e.core_start_sec
-                e.end_sec = e.core_end_sec
-
-    # Phase B: Proportional core trimming (LOW and MEDIUM)
-    if is_over_budget(entries):
-        logger.info(f"Tier 3 Phase B: Proportional core trimming on LOW/MEDIUM clips. Current: {get_total_dur(entries):.1f}s")
-        entries = _proportional_core_trim(
-            entries, max_allowed,
-            priority_filter=["LOW", "MEDIUM"]
-        )
-
-    # Phase C: Drop LOW clips (by ascending quality score)
-    if is_over_budget(entries):
-        logger.info(f"Tier 3 Phase C: Dropping LOW clips. Current: {get_total_dur(entries):.1f}s")
-        low_clips = sorted([e for e in entries if e.narrative_priority == "LOW"], key=lambda x: x.quality_score)
-        for e in low_clips:
-            if not is_over_budget(entries):
-                break
-            entries.remove(e)
-
-    # Phase D: Proportional core trimming (MEDIUM only)
-    if is_over_budget(entries):
-        logger.info(f"Tier 3 Phase D: Proportional core trimming on MEDIUM clips. Current: {get_total_dur(entries):.1f}s")
-        entries = _proportional_core_trim(
-            entries, max_allowed,
-            priority_filter=["MEDIUM"]
-        )
-
-    # Phase E: Drop MEDIUM clips (last resort before touching CRITICAL)
-    if is_over_budget(entries):
-        logger.info(f"Tier 3 Phase E: Dropping MEDIUM clips. Current: {get_total_dur(entries):.1f}s")
-        med_clips = sorted([e for e in entries if e.narrative_priority == "MEDIUM"], key=lambda x: x.quality_score)
-        for e in med_clips:
-            if not is_over_budget(entries):
-                break
-            entries.remove(e)
-
-    # Phase F: Trim CRITICAL padding
-    if is_over_budget(entries):
-        logger.info(f"Tier 3 Phase F: Trimming CRITICAL padding. Current: {get_total_dur(entries):.1f}s")
-        for e in entries:
-            if e.narrative_priority == "CRITICAL":
-                e.start_sec = e.core_start_sec
-                e.end_sec = e.core_end_sec
-
-    # Phase G: CRITICAL Exhaustion — halt and warn
-    final_dur = get_total_dur(entries)
-    if final_dur > max_allowed:
-        warning_msg = (
-            f"Budget Exceeded: Target duration is {target_duration}s "
-            f"(tolerance band: {max_allowed:.1f}s), but mandatory CRITICAL "
-            f"clips alone total {final_dur:.1f}s. Halted repair to preserve "
-            f"narrative integrity."
-        )
-        logger.warning(warning_msg)
-    else:
-        logger.info(f"Tier 3 repair complete. Final duration: {final_dur:.1f}s (target: {target_duration}s, max allowed: {max_allowed:.1f}s)")
-        
-    return entries, warning_msg
 
 def _partition_segments_into_chunks(
     segments: List[EGTSegment],
@@ -344,8 +288,8 @@ def generate_edl_chunked(
 
     Map Phase:
         Partitions EGT segments into chunks of settings.edl_chunk_size segments.
-        Calls generate_edl_llm() on each chunk with a time-proportional sub-budget
-        (target_duration * chunk_raw_duration / total_raw_duration).
+        Calls generate_edl_llm() on each chunk with target_duration passed as
+        soft editorial guidance (not a hard budget).
         Each chunk returns a local EDL list.
 
     Reduce Phase:
@@ -355,10 +299,14 @@ def generate_edl_chunked(
         sequence_index ordering + priority overrides.
         Falls back to positional ordering if Reduce fails.
 
-    Budget enforcement and speech-boundary snapping are applied once on the final
-    merged EDL, identical to the short-footage path.
+    Speech-boundary snapping is applied once on the final merged EDL.
     """
-    segments = egt_doc.segments
+    # Anti-hallucination guardrail: exclude bad and superseded takes entirely
+    # from the LLM prompt. This guarantees they cannot be selected.
+    segments = [
+        s for s in egt_doc.segments 
+        if not s.is_bad_take and not getattr(s, "is_superseded_take", False)
+    ]
     total_raw_duration = sum(s.duration_sec for s in segments) or 1.0
     chunk_size = settings.edl_chunk_size
     context_doc = egt_doc.context_summary
@@ -373,8 +321,13 @@ def generate_edl_chunked(
     # Map Phase
     # -----------------------------------------------------------------------
     import concurrent.futures
+    from app.utils.llm import current_job_id
+    parent_job_id = current_job_id.get()
 
     def process_map_chunk(chunk_idx, chunk):
+        if parent_job_id:
+            current_job_id.set(parent_job_id)
+            
         chunk_raw_duration = sum(s.duration_sec for s in chunk)
         chunk_sub_budget = (
             (target_duration * chunk_raw_duration / total_raw_duration)
@@ -425,7 +378,7 @@ def generate_edl_chunked(
                 f"Map chunk {chunk_idx + 1} LLM failed. Using mechanical fallback for this chunk."
             )
             for seg in chunk:
-                if not seg.is_bad_take and seg.segment_type != "SILENCE":
+                if not seg.is_bad_take and not getattr(seg, "is_superseded_take", False) and seg.segment_type != "SILENCE":
                     priority = "CRITICAL" if seg.segment_type in ("INTRO", "OUTRO") else "MEDIUM"
                     all_candidate_entries.append(
                         EDLEntry(
@@ -552,31 +505,20 @@ def generate_edl_chunked(
 
     entries = _enforce_broll_minimums(entries, segments)
 
-    # Budget Enforcement (Tier 3 Graduated Repair) — same as short-footage path
-    warning_msg = None
-    if target_duration:
-        entries, warning_msg = _enforce_budget(entries, target_duration)
-
     # Snap boundaries & Finalize
-    final_edl_dicts = []
-    for idx, entry in enumerate(entries):
+    for entry in entries:
         if transcript_segments:
-            orig_seg = seg_lookup.get(entry.clip_id)
             snapped_start, snapped_end = snap_boundary_to_speech(
                 entry.start_sec, entry.end_sec, entry.source_file, transcript_segments
             )
-            if orig_seg:
-                if abs(entry.start_sec - orig_seg.start_sec) > 0.1:
-                    snapped_start = entry.start_sec
-                if abs(entry.end_sec - orig_seg.end_sec) > 0.1:
-                    snapped_end = entry.end_sec
             entry.start_sec = snapped_start
             entry.end_sec = snapped_end
 
-        entry.sequence_index = idx
-        final_edl_dicts.append(entry.model_dump())
+    # Clean up and eliminate any overlapping cuts from adjacent clips
+    entries = _deduplicate_and_clamp_edl_overlaps(entries)
+    final_edl_dicts = [entry.model_dump() for entry in entries]
 
-    return final_edl_dicts, warning_msg
+    return final_edl_dicts, None
 
 
 def generate_edl(
@@ -584,23 +526,24 @@ def generate_edl(
     transcript_segments: Optional[List[Dict]] = None,
     target_duration: Optional[float] = None,
     user_prompt: str = ""
-) -> Tuple[List[Dict], Optional[str]]:
-    """Generate the Phase 0 EDL from a validated EGTDocument.
+) -> Tuple[List[Dict], Optional[str], str]:
+    """Generate the EDL from a validated EGTDocument.
 
-    Phase 0 algorithm:
-    1. Filter out segments where is_bad_take == True
-    2. Filter out segments where segment_type == "SILENCE"
-    3. Keep all remaining segments in strict chronological order
-    4. Ensure INTRO is first (if one exists) and OUTRO is last
-    5. Apply speech-boundary snapping
-    6. Emit EDLEntry dicts with sequential sequence_index
+    When a Gemini reasoning model is available, uses LLM-based editorial
+    reasoning (single-shot or Map-Reduce for large footage). Falls back
+    to a mechanical chronological filter if the LLM is unavailable.
+
+    target_duration is passed as soft editorial guidance to the LLM prompt,
+    not enforced as a hard budget constraint.
 
     Args:
         egt_doc: Validated EGTDocument from perception pass.
         transcript_segments: Raw transcript dicts for boundary snapping.
+        target_duration: Soft duration target for editorial guidance.
+        user_prompt: User's creative brief / context text.
 
     Returns:
-        List of EDLEntry dicts (serializable for storage and API).
+        Tuple of (EDL dicts, warning string or None, reasoning_mode string).
     """
     segments = egt_doc.segments
     logger.info(
@@ -614,26 +557,36 @@ def generate_edl(
             f"Segment count {len(segments)} exceeds edl_chunk_threshold "
             f"({settings.edl_chunk_threshold}). Using Map-Reduce EDL reasoning."
         )
-        return generate_edl_chunked(egt_doc, transcript_segments, target_duration, user_prompt)
+        return generate_edl_chunked(egt_doc, transcript_segments, target_duration, user_prompt) + ("llm_reasoned",)
 
     logger.info(
         f"Generating Phase 1 EDL using single-shot LLM Reasoning: {len(segments)} EGT segments."
     )
 
     egt_json = egt_doc.model_dump()
+    
+    # Anti-hallucination guardrail: exclude bad and superseded takes entirely
+    egt_json["segments"] = [
+        s for s in egt_json["segments"]
+        if not s.get("is_bad_take") and not s.get("is_superseded_take") and not s.get("is_stutter_repeat")
+    ]
+    
     llm_response = generate_edl_llm(egt_json, target_duration, user_prompt)
     
     # generate_edl_llm returns a dict with 'edl' and 'chain_of_thought' keys
     llm_edl_dicts = None
     cot_text = ""
+    reasoning_mode = "fallback_mechanical"
+    
     if isinstance(llm_response, dict):
         llm_edl_dicts = llm_response.get("edl", [])
-        cot_text = llm_response.get("chain_of_thought", "")
+        cot_text = llm_response.get("editorial_rationale", "")
     elif isinstance(llm_response, list):
         # Backward compatibility: older return format was just a list
         llm_edl_dicts = llm_response
     
     if llm_edl_dicts:
+        reasoning_mode = "llm_reasoned"
         logger.info(f"Phase 1 LLM returned {len(llm_edl_dicts)} EDL entries.")
         
         # 1. Parse into EDLEntry objects and enrich with quality_score
@@ -692,12 +645,12 @@ def generate_edl(
         removed_silence = 0
     
         for seg in segments:
-            if seg.is_bad_take:
+            if seg.is_bad_take or getattr(seg, "is_superseded_take", False) or getattr(seg, "is_stutter_repeat", False):
                 removed_bad += 1
                 logger.debug(
-                    f"Filtered (bad_take): {seg.clip_id} "
+                    f"Filtered (bad/superseded/stutter): {seg.clip_id} "
                     f"[{seg.source_file} {seg.start_sec:.1f}-{seg.end_sec:.1f}s] "
-                    f"score={seg.quality_score:.3f} flags={seg.quality_flags}"
+                    f"score={seg.quality_score:.3f}"
                 )
                 continue
             if seg.segment_type == "SILENCE":
@@ -717,7 +670,7 @@ def generate_edl(
     
         if not kept:
             logger.warning("EDL is empty after filtering — all segments were bad takes or silence.")
-            return [], None
+            return [], None, reasoning_mode
     
         # Sort by (source_file, start_sec) to preserve multi-file chronology
         kept.sort(key=lambda s: (s.source_file, s.start_sec))
@@ -748,33 +701,20 @@ def generate_edl(
 
     entries = _enforce_broll_minimums(entries, segments)
 
-    # 4. Budget Enforcement (Tier 3 Graduated Repair)
-    warning_msg = None
-    if target_duration:
-        entries, warning_msg = _enforce_budget(entries, target_duration)
-
-    # 5. Snap boundaries & Finalize
-    final_edl_dicts = []
-    for idx, entry in enumerate(entries):
+    # 4. Snap boundaries & Finalize
+    for entry in entries:
         start_sec = entry.start_sec
         end_sec = entry.end_sec
         
         if transcript_segments:
-            orig_seg = next((s for s in segments if s.clip_id == entry.clip_id), None)
             snapped_start, snapped_end = snap_boundary_to_speech(
                 start_sec, end_sec, entry.source_file, transcript_segments
             )
-            
-            if orig_seg:
-                if abs(start_sec - orig_seg.start_sec) > 0.1:
-                    snapped_start = start_sec
-                if abs(end_sec - orig_seg.end_sec) > 0.1:
-                    snapped_end = end_sec
-                    
             entry.start_sec = snapped_start
             entry.end_sec = snapped_end
         
-        entry.sequence_index = idx
-        final_edl_dicts.append(entry.model_dump())
+    # Clean up and eliminate any overlapping cuts from adjacent clips
+    entries = _deduplicate_and_clamp_edl_overlaps(entries)
+    final_edl_dicts = [entry.model_dump() for entry in entries]
         
-    return final_edl_dicts, warning_msg
+    return final_edl_dicts, None, reasoning_mode

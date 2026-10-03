@@ -97,7 +97,7 @@ def assemble_vlog(
 
     # Normalize EDL to the format expected by FFmpeg utils
     # The new EDLEntry uses 'source_file', legacy uses 'video_file'
-    normalized_edl = []
+    raw_normalized = []
     for entry in edl:
         normalized = {
             "video_file": entry.get("source_file") or entry.get("video_file", ""),
@@ -105,12 +105,28 @@ def assemble_vlog(
             "end_sec": entry["end_sec"],
             "type": entry.get("editorial_type") or entry.get("type", "KEEP"),
         }
-        normalized_edl.append(normalized)
+        raw_normalized.append(normalized)
+
+    # Defense in depth: clamp any accidental consecutive overlaps on the same video file
+    normalized_edl = []
+    for item in raw_normalized:
+        if not normalized_edl:
+            normalized_edl.append(item)
+            continue
+        prev = normalized_edl[-1]
+        if item.get("video_file") == prev.get("video_file"):
+            if item["start_sec"] >= prev["start_sec"] and item["end_sec"] <= prev["end_sec"]:
+                continue
+            if item["start_sec"] < prev["end_sec"]:
+                item["start_sec"] = prev["end_sec"]
+                if item["end_sec"] - item["start_sec"] < 0.1:
+                    continue
+        normalized_edl.append(item)
 
     # -----------------------------------------------------------------------
     # Primary Path: Single-pass filtergraph
     # -----------------------------------------------------------------------
-    if len(normalized_edl) <= 40:
+    if len(normalized_edl) <= 10:
         logger.info("Attempting single-pass filtergraph assembly...")
         success = assemble_single_pass(normalized_edl, file_map, final_output_path)
         if success:
@@ -123,7 +139,7 @@ def assemble_vlog(
         )
     else:
         logger.info(
-            f"EDL contains {len(normalized_edl)} clips (>{40}). "
+            f"EDL contains {len(normalized_edl)} clips (>{10}). "
             "Bypassing single-pass filtergraph to prevent resource exhaustion. "
             "Routing directly to parallel multi-pass pipeline."
         )

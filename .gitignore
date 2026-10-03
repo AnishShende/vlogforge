@@ -6,6 +6,13 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
+# OS
+.DS_Store
+
+# Logs & local databases
+*.log
+*.db
+
 # Node
 node_modules/
 npm-debug.log*
@@ -28,6 +35,7 @@ logs/
 outputs/
 uploads/
 test-videos/
+mocks/
 *.wav
 *.mp4
 *.mkv

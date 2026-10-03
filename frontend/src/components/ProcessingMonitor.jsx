@@ -8,7 +8,8 @@ const STAGES = [
   { key: 'analyzing', label: 'AI Keyframe & Context Analysis', desc: 'Gemini Vision parsing scene keyframes.' },
   { key: 'classifying', label: 'Segment Classification', desc: 'Labeling scenes with AI.' },
   { key: 'edl_generating', label: 'Generating EDL', desc: 'Applying target duration and pacing rules.' },
-  { key: 'assembling', label: 'FFmpeg Vlog Assembly', desc: 'Cutting, normalizing, and joining clips.' }
+  { key: 'assembling', label: 'FFmpeg Vlog Assembly', desc: 'Cutting, normalizing, and joining clips.' },
+  { key: 'metadata_generating', label: 'YouTube Metadata', desc: 'Generating title, description, tags, and chapters.' }
 ];
 
 export default function ProcessingMonitor({ jobId, onComplete, onFailed, onReset, onCancel }) {
@@ -37,7 +38,7 @@ export default function ProcessingMonitor({ jobId, onComplete, onFailed, onReset
   const { status } = useWebSocket(jobId, handleWebSocketMessage);
 
   const getStageStatus = (stageKey) => {
-    const stageOrder = ['pending', 'ingesting', 'transcribing', 'analyzing', 'classifying', 'edl_generating', 'assembling', 'complete'];
+    const stageOrder = ['pending', 'ingesting', 'transcribing', 'analyzing', 'classifying', 'edl_generating', 'assembling', 'metadata_generating', 'complete'];
     const currentIndex = stageOrder.indexOf(currentStage);
     const stageIndex = stageOrder.indexOf(stageKey);
 

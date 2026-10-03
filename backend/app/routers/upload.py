@@ -58,6 +58,7 @@ async def tus_create(request: Request, db: AsyncSession = Depends(get_db), curre
         raise HTTPException(status_code=404, detail="Project not found")
 
     file_id = str(uuid.uuid4())
+    os.makedirs(TUS_DIR, exist_ok=True)
     file_path = os.path.join(TUS_DIR, file_id)
     
     # Create empty file

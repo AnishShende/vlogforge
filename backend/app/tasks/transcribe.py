@@ -60,6 +60,38 @@ def transcribe_audio(audio_path: str, status_callback=None) -> List[Dict]:
     if not audio_path or not os.path.exists(audio_path):
         return []
 
+    from app.config import settings
+    if getattr(settings, "enable_mock_whisper", False):
+        import hashlib, json
+        # hash based on file modification time and path
+        try:
+            stat = os.stat(audio_path)
+            filename = os.path.basename(audio_path)
+            cache_key = hashlib.sha256(f"{filename}_{stat.st_size}".encode()).hexdigest()
+            print(f"[WHISPER CACHE DEBUG] audio_path={audio_path}, size={stat.st_size}, cache_key={cache_key}")
+        except Exception as e:
+            cache_key = hashlib.sha256(audio_path.encode()).hexdigest()
+            print(f"[WHISPER CACHE DEBUG] stat failed: {e}. Fallback cache_key={cache_key}")
+            
+        cache_file = os.path.join(settings.mock_llm_dir, f"whisper_{cache_key}.json")
+        print(f"[WHISPER CACHE DEBUG] Looking for cache file: {cache_file}")
+        
+        if os.path.exists(cache_file):
+            print(f"[WHISPER CACHE DEBUG] [MOCKED WHISPER CALL] Replaying cached transcription for {audio_path}")
+            logger.info(f"[MOCKED WHISPER CALL] Replaying cached transcription for {audio_path}")
+            if status_callback:
+                status_callback("using cached Whisper STT")
+            try:
+                with open(cache_file, "r") as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"[WHISPER CACHE DEBUG] Failed to load cache: {e}")
+                logger.warning(f"Failed to load Whisper cache: {e}")
+        else:
+            print(f"[WHISPER CACHE DEBUG] [REAL WHISPER CALL] Cache miss for {audio_path}. Calling faster-whisper...")
+            logger.info(f"[REAL WHISPER CALL] Cache miss for {audio_path}. Calling faster-whisper...")
+
+
     # Attempt local faster-whisper FIRST for accurate timestamps
     if status_callback:
         status_callback("using local Whisper STT")
@@ -95,8 +127,19 @@ def transcribe_audio(audio_path: str, status_callback=None) -> List[Dict]:
                         "end": segment.end,
                         "text": segment.text.strip()
                     })
+            
             logger.info(f"Whisper STT completed with {len(transcription_results)} segments/words.")
+            
+            if getattr(settings, "enable_mock_whisper", False):
+                try:
+                    os.makedirs(settings.mock_llm_dir, exist_ok=True)
+                    with open(cache_file, "w") as f:
+                        json.dump(transcription_results, f, indent=2)
+                except Exception as e:
+                    logger.warning(f"Failed to write Whisper cache {cache_file}: {e}")
+                    
             return transcription_results
+
         except Exception as e:
             logger.error(f"Whisper transcription failed: {e}. Falling back to Gemini STT.")
     else:
@@ -107,7 +150,7 @@ def transcribe_audio(audio_path: str, status_callback=None) -> List[Dict]:
         status_callback("Fallback: using Gemini 1.5 Flash Lite STT")
     logger.info("Attempting Speech-to-Text using Gemini 1.5 Flash Lite...")
     gemini_result = transcribe_audio_gemini(audio_path)
-    if gemini_result:
+    if gemini_result is not None:
         logger.info(f"Gemini 1.5 Flash Lite STT completed with {len(gemini_result)} segments.")
         return gemini_result
 
@@ -156,6 +199,7 @@ def align_transcript_with_segments(
         t_ptr = file_ptr.get(scene_file, 0)
 
         scene_text_pieces = []
+        scene_word_timings = []
 
         # Advance past segments that end before this scene starts
         while t_ptr < len(file_segs) and file_segs[t_ptr]["end"] <= scene_start:
@@ -169,6 +213,11 @@ def align_transcript_with_segments(
             seg_midpoint = seg["start"] + (seg["end"] - seg["start"]) / 2.0
             if scene_start <= seg_midpoint < scene_end:
                 scene_text_pieces.append(seg["text"])
+                scene_word_timings.append({
+                    "word": seg["text"],
+                    "start": seg["start"],
+                    "end": seg["end"],
+                })
             collect_ptr += 1
 
         # Persist the pointer so the next scene starts its skip from here
@@ -176,6 +225,9 @@ def align_transcript_with_segments(
 
         # Write to EGTSegment fields
         egt_seg.transcript = " ".join(scene_text_pieces).strip()
+        word_count = len(egt_seg.transcript.split()) if egt_seg.transcript else 0
+        egt_seg.has_speech = word_count >= 3
+        egt_seg.word_timings = scene_word_timings
         egt_seg.language_id = "en"  # Phase 0: English only
 
     return egt_segments

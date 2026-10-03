@@ -64,8 +64,12 @@ def ingest_video(video_path: str, job_dir: str) -> Dict:
     from app.utils.ffmpeg import generate_proxy
     proxy_filename = f"{os.path.splitext(filename)[0]}_proxy.mp4"
     proxy_path = os.path.join(proxy_dir, proxy_filename)
-    logger.info(f"Generating lightweight proxy: {video_path} -> {proxy_path}")
-    proxy_success = generate_proxy(video_path, proxy_path)
+    if os.path.exists(proxy_path):
+        logger.info(f"Using cached lightweight proxy: {proxy_path}")
+        proxy_success = True
+    else:
+        logger.info(f"Generating lightweight proxy: {video_path} -> {proxy_path}")
+        proxy_success = generate_proxy(video_path, proxy_path)
 
     # Use proxy for downstream processing; fall back to original on failure
     active_video_path = proxy_path if proxy_success else video_path
@@ -80,8 +84,12 @@ def ingest_video(video_path: str, job_dir: str) -> Dict:
     # -----------------------------------------------------------------------
     audio_filename = f"{os.path.splitext(filename)[0]}.wav"
     audio_path = os.path.join(audio_dir, audio_filename)
-    logger.info(f"Extracting audio to: {audio_path}")
-    audio_success = extract_audio(active_video_path, audio_path)
+    if os.path.exists(audio_path):
+        logger.info(f"Using cached audio: {audio_path}")
+        audio_success = True
+    else:
+        logger.info(f"Extracting audio to: {audio_path}")
+        audio_success = extract_audio(active_video_path, audio_path)
     actual_audio_path = audio_path if audio_success else None
 
     # -----------------------------------------------------------------------

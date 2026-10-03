@@ -10,6 +10,8 @@ description: "Low-level utility modules providing FFmpeg video processing, Googl
 - `ffmpeg.py`: All video I/O operations — probing, audio extraction, keyframe extraction, CFR transcoding, clip trimming/scaling/normalization, crossfade concatenation, single-pass filtergraph assembly, and fade effects.
 - `llm.py`: All Gemini API interactions — initialization, retry/fallback logic, keyframe description, context synthesis, segment classification (both legacy and EGT-aware), rolling window context building, EDL LLM generation, STT, and reel selection.
 - `interaction_logger.py`: Structured audit logging to daily log files. Records API-level user actions (create_job, cancel_job, download) and full pipeline completion summaries with EGT+EDL data.
+- `jev.py`: JEV (TypeSafe "System One") client integration — a thread-safe singleton used by the retake/redundancy detectors to validate whether two utterances are an explicit retake. Entry point `check_is_explicit_retake_jev()`. Needs `TYPESAFE_API_KEY` (set into the environment by `config.py`).
+- `word_snap.py`: Word-boundary-aware cut-point snapping. `snap_to_word_boundaries()` adjusts raw cut times to the nearest word gap; `snap_edl_to_word_boundaries()` applies it across a whole EDL so cuts never slice mid-word. Called by the orchestrator between EDL generation and assembly.
 
 ## 🔄 Integration & Data Flow
 - **Inputs**:
@@ -30,9 +32,9 @@ description: "Low-level utility modules providing FFmpeg video processing, Googl
   - [get_ffmpeg_path](backend/app/utils/ffmpeg.py#L11-L27) / [get_ffprobe_path](backend/app/utils/ffmpeg.py#L29-L45): Resolve conda-env or system-path binary locations.
   - [get_video_info](backend/app/utils/ffmpeg.py#L47-L63), [get_video_duration](backend/app/utils/ffmpeg.py#L65-L71), [has_audio_stream](backend/app/utils/ffmpeg.py#L73-L82): Video metadata inspection via ffprobe.
   - [extract_audio](backend/app/utils/ffmpeg.py#L84-L101): Extracts 16kHz mono WAV for Whisper/Gemini STT.
-  - [extract_keyframe](backend/app/utils/ffmpeg.py#L103-L119): Seeks to a timestamp and saves a JPEG keyframe.
-  - [transcode_to_cfr](backend/app/utils/ffmpeg.py#L138-L160): Re-encodes VFR video to strict 30fps CFR H.264 (prevents PySceneDetect/Whisper timestamp drift).
-  - [process_clip](backend/app/utils/ffmpeg.py#L162-L212): Trims, scales to 1920x1080, normalizes audio to -14 LUFS (loudnorm). GPU-accelerated with CPU fallback.
+  - [extract_keyframe](backend/app/utils/ffmpeg.py): Seeks to a timestamp and saves a JPEG keyframe.
+  - [generate_proxy](backend/app/utils/ffmpeg.py): Generates a lightweight 360p proxy for AI analysis and enforces CFR to prevent drift. GPU-accelerated with CPU fallback.
+  - [process_clip](backend/app/utils/ffmpeg.py): Trims, scales to 1920x1080, normalizes audio to -14 LUFS (loudnorm). GPU-accelerated with CPU fallback.
   - [concatenate_clips_with_crossfade](backend/app/utils/ffmpeg.py#L254-L300+): Builds a dynamic `filter_complex` graph for sequential audio crossfades (75ms acrossfade). Falls back to hard-concat for >30 clips.
   - `apply_fade_effects` / `assemble_single_pass`: Final rendering passes. Implements decoupled video and audio fades (1.0s visual fade to black, 0.1s audio fade) to prevent cutting off OUTRO speech.
 
@@ -47,7 +49,16 @@ description: "Low-level utility modules providing FFmpeg video processing, Googl
   - `generate_edl_llm`, `select_reel_segments_llm`, `sequence_edl_segments`: LLM-powered EDL reasoning functions. `generate_edl_llm` implements **Tier 2 (Propose)** of the Neurosymbolic architecture, generating an ordered EDL where every clip has a `narrative_priority` (LOW/MEDIUM/CRITICAL) and a strict `core` boundary alongside wider `start_sec`/`end_sec` padding.
   - `transcribe_audio_gemini`: Gemini-based STT (used as primary before Whisper fallback).
 
+- [jev.py](backend/app/utils/jev.py): `check_is_explicit_retake_jev(...)` — TypeSafe System-One validation of whether two candidate utterances are the same line re-taken. Lazily builds a singleton client reused across threads.
+
+- [word_snap.py](backend/app/utils/word_snap.py): `snap_to_word_boundaries(...)` and `snap_edl_to_word_boundaries(edl, ...)` — move cut points to the nearest word gap using the aligned word timeline.
+
 - [interaction_logger.py](backend/app/utils/interaction_logger.py): Singleton `InteractionLogger` class.
-  - [log_interaction](backend/app/utils/interaction_logger.py#L26-L32): Logs API action events as structured JSON.
-  - [log_pipeline_completion](backend/app/utils/interaction_logger.py#L34-L66): Writes a detailed EGT+EDL summary to the interactions log at pipeline end.
+  - [log_interaction](backend/app/utils/interaction_logger.py#L26): `log_interaction(action: str, details: dict)` — logs an API action event as structured JSON.
+  - [log_pipeline_completion](backend/app/utils/interaction_logger.py#L34): `log_pipeline_completion(job_id, egt_data, edl_data)` — writes a detailed EGT+EDL summary at pipeline end.
   - `interaction_logger` singleton: module-level instance imported by `main.py` and `orchestrator.py`.
+
+## 🛠️ Conventions & Anti-patterns
+- Route every Gemini call through `safe_generate_content(...)` (it owns retry + model fallback). Do not call `_gemini_client.models.generate_content` directly.
+- For progress/observability, broadcast via the orchestrator — the async API is `broadcast_progress(job_id, stage, progress: int, message, download_url=None)`, and inside the pipeline thread use the local sync wrapper `safe_broadcast(stage, progress, message)`. `progress` is a positional int (0–100), not a `percent=` kwarg.
+- Log significant events through `interaction_logger`, not bare `print()`. Never broadcast raw exception/stack traces to the client over the WebSocket — log them internally and send a safe, human-readable status.

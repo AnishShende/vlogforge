@@ -127,7 +127,8 @@ async def create_job(
         target_duration=target_duration,
         quality_threshold=quality_threshold,
         created_at=datetime.utcnow(),
-        warnings=[]
+        warnings=[],
+        llm_mode="mocked" if getattr(settings, "enable_mock_llm", False) else "real"
     )
     # Update Project in Postgres with settings and processing status
     project_result = await db.execute(select(Project).where(Project.id == project_id))
@@ -214,6 +215,21 @@ def get_job_edl(job_id: str):
     return {
         "job_id": job_id,
         "edl": job_data["edl"]
+    }
+
+@app.get("/api/jobs/{job_id}/metadata")
+def get_job_metadata(job_id: str):
+    """Retrieve AI-generated YouTube metadata (M5).
+
+    Returns title, description, tags, and chapter markers generated
+    by the metadata pipeline stage after video assembly.
+    """
+    job_data = get_job_data(job_id)
+    if not job_data or "metadata" not in job_data:
+        raise HTTPException(status_code=404, detail="Metadata not available for this job yet.")
+    return {
+        "job_id": job_id,
+        "metadata": job_data["metadata"]
     }
 
 @app.get("/api/jobs/{job_id}/download")

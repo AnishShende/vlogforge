@@ -1,10 +1,9 @@
-"""Tests for the budget-aware EDL pipeline changes.
+"""Tests for EDL pipeline components.
 
 Tests cover:
-- Proportional core trimming (prevents 285s→24s cliff drops)
-- Tolerance band enforcement (±10%)
 - Priority validation (CoT → priority mismatch detection)
 - Editorial subdivision (long segments → atomic editorial units)
+- Soft duration guidance in LLM prompt
 """
 
 import pytest
@@ -12,8 +11,6 @@ import pytest
 from app.models import EGTSegment, EGTDocument, EDLEntry, generate_clip_id
 from app.tasks.edl import (
     _validate_priority_consistency,
-    _proportional_core_trim,
-    _MIN_CLIP_DURATION_SEC,
 )
 
 
@@ -44,69 +41,6 @@ def _make_edl_entry(
         editorial_type="KEEP",
         sequence_index=0,
     )
-
-
-# ---------------------------------------------------------------------------
-# Proportional Core Trimming
-# ---------------------------------------------------------------------------
-
-class TestProportionalCoreTrim:
-    """Tests for _proportional_core_trim."""
-
-    def test_no_trim_when_under_budget(self):
-        """Should not trim anything when total is already under budget."""
-        entries = [
-            _make_edl_entry(clip_id="a", start=0, end=50, priority="MEDIUM"),
-            _make_edl_entry(clip_id="b", start=50, end=100, priority="MEDIUM"),
-        ]
-        result = _proportional_core_trim(entries, max_allowed=120.0, priority_filter=["MEDIUM"])
-        total = sum(e.end_sec - e.start_sec for e in result)
-        assert total == 100.0
-
-    def test_proportional_trim_distributes_excess(self):
-        """Total 285s with 198s max_allowed → should trim to ~198s, not drop clips."""
-        entries = [
-            _make_edl_entry(clip_id="intro", start=0, end=21, priority="CRITICAL"),
-            _make_edl_entry(clip_id="main", start=21, end=282, priority="MEDIUM"),
-            _make_edl_entry(clip_id="outro", start=282, end=285, priority="CRITICAL"),
-        ]
-        result = _proportional_core_trim(entries, max_allowed=198.0, priority_filter=["MEDIUM"])
-        total = sum(e.end_sec - e.start_sec for e in result)
-
-        # All 3 clips should still be present
-        assert len(result) == 3
-        # Total should be close to 198s (intro 21 + trimmed main + outro 3)
-        # The main clip (261s) should be trimmed down, CRITICAL clips untouched
-        assert total <= 198.0 + 1.0  # Allow small floating point margin
-        assert total > 24.0  # Must be way more than the old 24s result
-
-    def test_respects_minimum_clip_duration(self):
-        """Should never trim a clip below _MIN_CLIP_DURATION_SEC (3s)."""
-        entries = [
-            _make_edl_entry(clip_id="short", start=0, end=4, priority="MEDIUM"),
-            _make_edl_entry(clip_id="long", start=4, end=200, priority="MEDIUM"),
-        ]
-        result = _proportional_core_trim(entries, max_allowed=50.0, priority_filter=["MEDIUM"])
-
-        for e in result:
-            clip_dur = e.end_sec - e.start_sec
-            assert clip_dur >= _MIN_CLIP_DURATION_SEC
-
-    def test_only_trims_matching_priority(self):
-        """Should only trim clips matching the priority_filter."""
-        entries = [
-            _make_edl_entry(clip_id="crit", start=0, end=100, priority="CRITICAL"),
-            _make_edl_entry(clip_id="med", start=100, end=200, priority="MEDIUM"),
-        ]
-        result = _proportional_core_trim(entries, max_allowed=150.0, priority_filter=["MEDIUM"])
-
-        # CRITICAL clip should be untouched
-        crit = next(e for e in result if e.clip_id == "crit")
-        assert crit.end_sec - crit.start_sec == 100.0
-
-        # MEDIUM clip should be trimmed
-        med = next(e for e in result if e.clip_id == "med")
-        assert med.end_sec - med.start_sec < 100.0
 
 
 # ---------------------------------------------------------------------------
@@ -178,89 +112,14 @@ class TestPriorityValidation:
 
 
 # ---------------------------------------------------------------------------
-# Tolerance Band
-# ---------------------------------------------------------------------------
-
-class TestToleranceBand:
-    """Tests verifying that ±10% tolerance prevents over-correction."""
-
-    def test_285s_edl_against_180s_target_not_24s(self):
-        """The bug scenario: 285s EDL against 180s target should NOT produce 24s.
-
-        With graduated repair (proportional trimming + tolerance band), the
-        result should land near 180s (within ±10% = 162-198s), not the old
-        24s catastrophic failure.
-        """
-        # Simulate the tea video: 21s intro (CRITICAL), 260s main (MEDIUM), 3s outro (CRITICAL)
-        entries = [
-            _make_edl_entry(clip_id="intro", start=0, end=21, core_start=0.5, core_end=21, priority="CRITICAL"),
-            _make_edl_entry(clip_id="main", start=21, end=282, core_start=21.5, core_end=281.5, priority="MEDIUM"),
-            _make_edl_entry(clip_id="outro", start=282, end=285, core_start=282, core_end=284.5, priority="CRITICAL"),
-        ]
-
-        target_duration = 180.0
-        budget_tolerance = 0.10
-        max_allowed = target_duration * (1.0 + budget_tolerance)  # 198s
-
-        # Phase A: Trim padding
-        for e in entries:
-            if e.narrative_priority in ["LOW", "MEDIUM"]:
-                e.start_sec = e.core_start_sec
-                e.end_sec = e.core_end_sec
-
-        total = sum(e.end_sec - e.start_sec for e in entries)
-
-        # Phase B: Proportional trim
-        if total > max_allowed:
-            entries = _proportional_core_trim(entries, max_allowed, priority_filter=["LOW", "MEDIUM"])
-
-        total = sum(e.end_sec - e.start_sec for e in entries)
-
-        # All 3 clips should still exist
-        assert len(entries) == 3
-
-        # Total should be close to max_allowed, not 24s
-        assert total > 100.0, f"Total {total}s is catastrophically low — the old bug reproduced"
-        assert total <= max_allowed + 1.0, f"Total {total}s exceeds tolerance band"
-
-    def test_mechanical_fallback_budget_enforcement(self, monkeypatch):
-        """Verify that when LLM fails, the Phase 0 fallback still enforces budget."""
-        from app.tasks.edl import generate_edl
-        
-        # Create a mock EGT document with one long scene
-        seg = EGTSegment(
-            clip_id="abc1234",
-            source_file="test.mp4",
-            start_sec=0.0,
-            end_sec=285.0,
-            transcript="test transcript",
-            segment_type="SPEECH"
-        )
-        egt_doc = EGTDocument(segments=[seg], source_files=["test.mp4"])
-        
-        # Mock LLM to fail/return None
-        monkeypatch.setattr("app.tasks.edl.generate_edl_llm", lambda *args, **kwargs: None)
-        
-        # Run generate_edl with target_duration=180.0
-        final_edl_dicts, warning_msg = generate_edl(egt_doc, target_duration=180.0)
-        
-        # It should have run mechanical filter + budget enforcement
-        assert len(final_edl_dicts) == 1
-        result_dur = final_edl_dicts[0]["end_sec"] - final_edl_dicts[0]["start_sec"]
-        
-        # Should be trimmed to max allowed (180 + 10% = 198)
-        assert result_dur <= 198.1
-
-
-# ---------------------------------------------------------------------------
 # Editorial Subdivision
 # ---------------------------------------------------------------------------
 
 class TestEditorialSubdivide:
     """Tests for editorial_subdivide from scene_detect.py."""
 
-    def test_long_segment_is_subdivided(self):
-        """A 260s segment with speech gaps should be split into multiple sub-segments."""
+    def test_long_segment_is_subdivided_with_distinct_keyframes(self, monkeypatch, tmp_path):
+        """A 260s segment with speech gaps should be split, and each sub-segment gets a distinct keyframe."""
         import sys
         import types
 
@@ -275,14 +134,23 @@ class TestEditorialSubdivide:
             sys.modules["scenedetect"] = mock_sd
             sys.modules["scenedetect.detectors"] = mock_detectors
 
+        # Mock extract_keyframe to verify it's called with correct midpoints
+        extracted_keyframes = {}
+        def mock_extract(video_path, t, out_path):
+            extracted_keyframes[out_path] = t
+            return True
+        monkeypatch.setattr("app.utils.ffmpeg.extract_keyframe", mock_extract)
+
         from app.tasks.scene_detect import editorial_subdivide
 
+        parent_kf = str(tmp_path / "keyframes" / "test_scene_0.jpg")
         seg = EGTSegment(
             clip_id=generate_clip_id("test.mp4", 0.0, 260.0),
             source_file="test.mp4",
             start_sec=0.0,
             end_sec=260.0,
             transcript="hello world this is a long segment",
+            keyframe_path=parent_kf,
         )
 
         # Create transcript segments with gaps every ~30s
@@ -295,23 +163,32 @@ class TestEditorialSubdivide:
                 "text": f"word at {i}",
             })
 
+        files_info = [{"filename": "test.mp4", "cfr_path": "/mock/proxy/test_proxy.mp4"}]
         result = editorial_subdivide(
             segments=[seg],
             transcript_segments=transcript_segments,
-            target_duration=180.0,  # max_segment_sec = max(30, 27) = 30s
+            target_duration=180.0,
+            files_info=files_info,
+            job_dir=str(tmp_path),
         )
 
         # Should have multiple sub-segments
         assert len(result) > 1
-        # All sub-segments should be <= max_segment_sec (30s) or close
+        
+        # Verify keyframes are distinct and properly extracted
+        assert len(extracted_keyframes) == len(result)
         for sub in result:
             assert sub.end_sec - sub.start_sec <= 35.0  # Allow small margin
-        # Tags should include editorial_split
-        for sub in result:
             assert "editorial_split" in sub.tags
+            assert sub.keyframe_path != parent_kf
+            assert sub.keyframe_path in extracted_keyframes
+            
+            # Verify the extraction timestamp was the sub-segment midpoint
+            expected_midpoint = sub.start_sec + (sub.end_sec - sub.start_sec) / 2.0
+            assert extracted_keyframes[sub.keyframe_path] == expected_midpoint
 
-    def test_short_segment_unchanged(self):
-        """Segments shorter than max_segment_sec should pass through unchanged."""
+    def test_short_segment_unchanged_keeps_keyframe(self, monkeypatch):
+        """Segments shorter than max_segment_sec should pass through unchanged and keep their keyframe."""
         import sys
         import types
 
@@ -325,21 +202,155 @@ class TestEditorialSubdivide:
             sys.modules["scenedetect"] = mock_sd
             sys.modules["scenedetect.detectors"] = mock_detectors
 
+        # Track if extract_keyframe is called
+        extract_called = False
+        def mock_extract(*args, **kwargs):
+            nonlocal extract_called
+            extract_called = True
+            return True
+        monkeypatch.setattr("app.utils.ffmpeg.extract_keyframe", mock_extract)
+
         from app.tasks.scene_detect import editorial_subdivide
 
+        parent_kf = "/mock/job/keyframes/test_scene_0.jpg"
         seg = EGTSegment(
             clip_id=generate_clip_id("test.mp4", 0.0, 20.0),
             source_file="test.mp4",
             start_sec=0.0,
             end_sec=20.0,
             transcript="short clip",
+            keyframe_path=parent_kf,
         )
 
+        files_info = [{"filename": "test.mp4", "cfr_path": "/mock/proxy/test_proxy.mp4"}]
         result = editorial_subdivide(
             segments=[seg],
             transcript_segments=[],
             target_duration=180.0,
+            files_info=files_info,
+            job_dir="/mock/job",
         )
 
         assert len(result) == 1
         assert result[0].clip_id == seg.clip_id
+        assert result[0].keyframe_path == parent_kf
+        assert not extract_called
+
+
+# ---------------------------------------------------------------------------
+# Soft Duration Guidance in LLM Prompt
+# ---------------------------------------------------------------------------
+
+class TestSoftDurationGuidance:
+    """Tests confirming target_duration is present as soft guidance in the LLM prompt."""
+
+    def test_target_duration_appears_as_soft_guidance_in_prompt(self, monkeypatch):
+        """The EDL LLM prompt should contain target_duration as soft guidance, not a hard constraint."""
+        import sys
+        import types as pytypes
+
+        # Mock google.genai.types so the import inside generate_edl_llm succeeds
+        if "google" not in sys.modules:
+            mock_google = pytypes.ModuleType("google")
+            mock_genai = pytypes.ModuleType("google.genai")
+
+            class MockTypes:
+                @staticmethod
+                def GenerateContentConfig(**kwargs):
+                    return kwargs
+
+            mock_genai.types = MockTypes
+            mock_google.genai = mock_genai
+            sys.modules["google"] = mock_google
+            sys.modules["google.genai"] = mock_genai
+            sys.modules["google.genai.types"] = MockTypes
+
+        captured_prompts = []
+
+        def mock_safe_generate(*args, **kwargs):
+            # Capture the prompt (first positional arg after model is contents)
+            contents = kwargs.get("contents") or (args[1] if len(args) > 1 else "")
+            captured_prompts.append(contents)
+            # Return a mock response
+            class MockResponse:
+                text = '{"chain_of_thought": "test", "edl": []}'
+            return MockResponse()
+
+        monkeypatch.setattr("app.utils.llm.safe_generate_content", mock_safe_generate)
+        monkeypatch.setattr("app.utils.llm.init_gemini", lambda: True)
+
+        from app.utils.llm import generate_edl_llm
+
+        egt_json = {
+            "segments": [
+                {"clip_id": "a", "source_file": "test.mp4", "start_sec": 0, "end_sec": 10,
+                 "segment_type": "SPEECH", "transcript": "hello"}
+            ],
+            "total_duration_sec": 10.0,
+        }
+
+        generate_edl_llm(egt_json, target_duration=180.0, user_prompt="")
+
+        assert len(captured_prompts) == 1
+        prompt = captured_prompts[0]
+
+        # Should contain soft guidance language
+        assert "DURATION TARGET (SOFT GUIDANCE)" in prompt
+        assert "180" in prompt
+        assert "creative target, not a hard limit" in prompt
+
+        # Should NOT contain old hard constraint language
+        assert "HARD CONSTRAINT" not in prompt
+        assert "MUST total between" not in prompt
+
+    def test_no_duration_section_when_target_is_none(self, monkeypatch):
+        """When target_duration is None, the prompt should not contain any duration guidance."""
+        import sys
+        import types as pytypes
+
+        # Mock google.genai.types so the import inside generate_edl_llm succeeds
+        if "google" not in sys.modules:
+            mock_google = pytypes.ModuleType("google")
+            mock_genai = pytypes.ModuleType("google.genai")
+
+            class MockTypes:
+                @staticmethod
+                def GenerateContentConfig(**kwargs):
+                    return kwargs
+
+            mock_genai.types = MockTypes
+            mock_google.genai = mock_genai
+            sys.modules["google"] = mock_google
+            sys.modules["google.genai"] = mock_genai
+            sys.modules["google.genai.types"] = MockTypes
+
+        captured_prompts = []
+
+        def mock_safe_generate(*args, **kwargs):
+            contents = kwargs.get("contents") or (args[1] if len(args) > 1 else "")
+            captured_prompts.append(contents)
+            class MockResponse:
+                text = '{"chain_of_thought": "test", "edl": []}'
+            return MockResponse()
+
+        monkeypatch.setattr("app.utils.llm.safe_generate_content", mock_safe_generate)
+        monkeypatch.setattr("app.utils.llm.init_gemini", lambda: True)
+
+        from app.utils.llm import generate_edl_llm
+
+        egt_json = {
+            "segments": [
+                {"clip_id": "a", "source_file": "test.mp4", "start_sec": 0, "end_sec": 10,
+                 "segment_type": "SPEECH", "transcript": "hello"}
+            ],
+            "total_duration_sec": 10.0,
+        }
+
+        generate_edl_llm(egt_json, target_duration=None, user_prompt="")
+
+        assert len(captured_prompts) == 1
+        prompt = captured_prompts[0]
+
+        assert "DURATION TARGET" not in prompt
+        assert "DURATION BUDGET" not in prompt
+
