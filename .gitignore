@@ -46,3 +46,5 @@ mocks/
 backend/eval/drift/_out/
 eval-set/
 Archdoc.txt
+
+docs/

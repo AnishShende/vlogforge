@@ -53,13 +53,30 @@ def _forced_align(audio_path: str, segments: List[Dict]) -> Optional[List[Dict]]
         aligned = whisperx.align(
             segs, model_a, metadata, audio, device="cpu", return_char_alignments=False,
         )
+        from app.config import settings
+        keep_untimed = getattr(settings, "enable_word_grid", False)
         out = []
+        dropped = 0
         for seg in aligned.get("segments", []):
+            seg_words = []
             for w in seg.get("words", []):
+                text = str(w.get("word", "")).strip()
                 if w.get("start") is None or w.get("end") is None:
+                    dropped += 1
+                    if keep_untimed and text:
+                        seg_words.append({"start": None, "end": None, "text": text})
                     continue
-                out.append({"start": float(w["start"]), "end": float(w["end"]),
-                            "text": str(w.get("word", "")).strip()})
+                entry = {"start": float(w["start"]), "end": float(w["end"]), "text": text}
+                if keep_untimed and w.get("score") is not None:
+                    entry["conf"] = round(float(w["score"]), 4)
+                    entry["conf_src"] = "aligner_score"
+                seg_words.append(entry)
+            if keep_untimed:
+                _interpolate_untimed(seg_words, seg.get("start"), seg.get("end"))
+            out.extend(seg_words)
+        if dropped:
+            logger.warning(f"[FORCED-ALIGN] {dropped} word(s) had no aligned time: "
+                           + ("interpolated + flagged" if keep_untimed else "DROPPED (word grid off)"))
         if not out:
             logger.warning("[FORCED-ALIGN] produced no words; keeping raw Whisper times.")
             return None
@@ -69,6 +86,51 @@ def _forced_align(audio_path: str, segments: List[Dict]) -> Optional[List[Dict]]
     except Exception as e:
         logger.error(f"[FORCED-ALIGN] failed ({e}); keeping raw Whisper times.")
         return None
+
+
+def _interpolate_untimed(words: List[Dict], seg_start: Optional[float], seg_end: Optional[float]) -> None:
+    """Give words the aligner could not time (numbers, symbols, out-of-dictionary
+    tokens) evenly spread times between their timed neighbours, in place, and flag
+    them (Archdoc §9.1: interpolate with a low-confidence flag, never drop)."""
+    i = 0
+    while i < len(words):
+        if words[i]["start"] is not None:
+            i += 1
+            continue
+        j = i
+        while j < len(words) and words[j]["start"] is None:
+            j += 1
+        lo = words[i - 1]["end"] if i > 0 else (seg_start if seg_start is not None else None)
+        hi = words[j]["start"] if j < len(words) else (seg_end if seg_end is not None else None)
+        if lo is None and hi is None:
+            lo = hi = 0.0
+        elif lo is None:
+            lo = hi
+        elif hi is None:
+            hi = lo
+        hi = max(hi, lo)
+        step = (hi - lo) / (j - i)
+        for k in range(i, j):
+            words[k]["start"] = round(lo + step * (k - i), 4)
+            words[k]["end"] = round(lo + step * (k - i + 1), 4)
+            words[k]["interpolated"] = True
+        i = j
+
+
+def _clip_transcriber(model):
+    """Re-transcribe each clip on its own (Archdoc Phase 1 S5). Measured on 40 IMG_1614
+    gaps: one-at-a-time with the file language 129 s; faster-whisper batched clips 343 s
+    and merged neighbouring clips' text, so not used."""
+    from app.tasks.asr_recovery import guarded_text
+
+    def transcribe_clips(audio, clips, language):
+        texts = []
+        for a, b in clips:
+            segs, _ = model.transcribe(audio[int(a * 16000): int(b * 16000)], beam_size=5, temperature=0.0,
+                                       condition_on_previous_text=False, vad_filter=False, language=language)
+            texts.append(guarded_text(list(segs)))
+        return texts
+    return transcribe_clips
 
 
 def get_whisper_model():
@@ -127,7 +189,11 @@ def transcribe_audio(audio_path: str, status_callback=None) -> List[Dict]:
         try:
             stat = os.stat(audio_path)
             filename = os.path.basename(audio_path)
-            cache_key = hashlib.sha256(f"{filename}_{stat.st_size}".encode()).hexdigest()
+            # Word grid on => v3 transcripts (temperature 0, conf, interpolated + recovered
+            # words; Archdoc Phase 1 S5). Separate cache so v1 replays (baseline) stay
+            # byte-identical. v2 (no recovery, fallback decoding) is superseded.
+            version = "v3|" if getattr(settings, "enable_word_grid", False) else ""
+            cache_key = hashlib.sha256(f"{version}{filename}_{stat.st_size}".encode()).hexdigest()
             print(f"[WHISPER CACHE DEBUG] audio_path={audio_path}, size={stat.st_size}, cache_key={cache_key}")
         except Exception as e:
             cache_key = hashlib.sha256(audio_path.encode()).hexdigest()
@@ -160,9 +226,13 @@ def transcribe_audio(audio_path: str, status_callback=None) -> List[Dict]:
     
     if model is not None:
         try:
+            grid_mode = getattr(settings, "enable_word_grid", False)
             segments, info = model.transcribe(
                 audio_path,
                 beam_size=5,
+                # word grid: temperature 0 only. Fallback re-decodes repetitive (stutter)
+                # segments by random sampling: non-deterministic, drops attempts (S4).
+                **({"temperature": 0.0} if grid_mode else {}),
                 condition_on_previous_text=False,
                 vad_filter=True,
                 vad_parameters=dict(
@@ -183,11 +253,15 @@ def transcribe_audio(audio_path: str, status_callback=None) -> List[Dict]:
                     })
                 if segment.words:
                     for word in segment.words:
-                        transcription_results.append({
+                        entry = {
                             "start": word.start,
                             "end": word.end,
                             "text": word.word.strip()
-                        })
+                        }
+                        if getattr(settings, "enable_word_grid", False):
+                            entry["conf"] = round(float(word.probability), 4)
+                            entry["conf_src"] = "whisper_probability"
+                        transcription_results.append(entry)
                 else:
                     transcription_results.append({
                         "start": segment.start,
@@ -206,6 +280,15 @@ def transcribe_audio(audio_path: str, status_callback=None) -> List[Dict]:
                 refined = _forced_align(audio_path, whisper_segments)
                 if refined is not None:
                     transcription_results = refined
+                    # Archdoc Phase 1 S5 (candidate E): re-transcribe speech the first
+                    # pass skipped, in the language it detected, and merge it back.
+                    if grid_mode:
+                        from app.tasks.asr_recovery import recover_skipped_speech
+                        if status_callback:
+                            status_callback("recovering skipped speech")
+                        transcription_results, _stats = recover_skipped_speech(
+                            audio_path, transcription_results, _clip_transcriber(model), _forced_align,
+                            language=getattr(info, "language", None))
 
             if getattr(settings, "enable_mock_whisper", False):
                 try:

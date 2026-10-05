@@ -34,6 +34,8 @@ from app.models import JobStatus, VideoFileInfo, WSProgressEvent, EGTSegment, EG
 from app.tasks.ingest import ingest_video
 from app.tasks.scene_detect import detect_scenes, subdivide_by_speech_gaps, editorial_subdivide
 from app.tasks.transcribe import transcribe_audio, align_transcript_with_segments
+from app.tasks.word_grid import build_word_grid, check_word_grid, summarize_word_grid
+from app.utils.speech_activity import envelope, load_audio
 from app.tasks.analyze import analyze_segments
 from app.tasks.score import score_segments, recompute_bad_takes
 from app.tasks.egt import build_egt_document, egt_to_serializable
@@ -290,6 +292,22 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
                     full_transcript_segments.append(t)
 
         check_cancelled()
+        # ---- Stage 2.5: Word grid (Archdoc Phase 1, flag-gated; no effect on output yet) ----
+        word_grid = None
+        if settings.enable_word_grid:
+            word_grid = build_word_grid(full_transcript_segments, asr={
+                "transcriber": "faster-whisper turbo",
+                "aligner": "whisperx wav2vec2" if settings.enable_forced_alignment else None,
+            })
+            envs = {f["filename"]: envelope(load_audio(f["audio_path"]))
+                    for f in files_info if f.get("audio_path") and os.path.exists(f["audio_path"])}
+            missing = {w.source_file for w in word_grid.words} - set(envs)
+            if missing:
+                logger.warning(f"[WORD-GRID] no analysis audio for {sorted(missing)}: speech checks skipped")
+            else:
+                word_grid = check_word_grid(word_grid, envs)
+            logger.info(f"[WORD-GRID] {summarize_word_grid(word_grid)}")
+
         # Align transcripts with EGT segments
         all_segments = align_transcript_with_segments(all_segments, full_transcript_segments)
 
@@ -410,6 +428,8 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
             "transcript": [seg.model_dump() for seg in all_segments],
             "context_document": context_summary,
         }
+        if word_grid is not None:
+            jobs_data_db[job_id]["word_grid"] = word_grid.model_dump()
 
         # ==================================================================
         # PASS 2 — REASONING (stub in Phase 0: mechanical filter only)
