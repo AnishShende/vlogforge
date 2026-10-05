@@ -63,10 +63,13 @@ class Settings(BaseSettings):
     # Dev/Test Mocks
     enable_mock_llm: bool = False
     enable_mock_whisper: bool = False
+    enable_mock_jev: bool = False        # Cache/replay JEV clean-take scores
     mock_llm_dir: str = "d:/VlogForge/mocks"
 
     # Phase 1+2 Feature Flags
     enable_word_timeline_redundancy: bool = False
+    enable_forced_alignment: bool = True   # refine Whisper word times via WhisperX
+                                           # (wav2vec2); no-op if whisperx missing
 
     model_config = SettingsConfigDict(
         env_file=os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".env"),

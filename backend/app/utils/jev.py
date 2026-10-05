@@ -8,9 +8,12 @@ The SDK reads ``TYPESAFE_API_KEY`` from the environment automatically.
 Do **not** hardcode or pass the key in code.
 """
 
+import hashlib
+import json
 import logging
+import os
 import threading
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from app.config import settings
 
@@ -332,6 +335,83 @@ def _build_rolling_window(segments: List[Dict], current_index: int, window_sec: 
             window_texts.append(seg_text)
 
     return " ".join(window_texts) if window_texts else ""
+
+# ---------------------------------------------------------------------------
+# Clean-take scoring for the word-timeline hybrid (with mock cache)
+# ---------------------------------------------------------------------------
+
+_CLEAN_TAKE_QUESTION = None
+
+
+def _clean_take_question():
+    global _CLEAN_TAKE_QUESTION
+    if _CLEAN_TAKE_QUESTION is None:
+        from typesafe_sdk import Score
+        _CLEAN_TAKE_QUESTION = {
+            "fluent_complete": Score(
+                instructions=(
+                    "This is a raw speech-to-text transcription of one attempt at speaking "
+                    "a sentence for a vlog. Rate it as a candidate CLEAN TAKE, judging whether "
+                    "the thought is COMPLETE and the delivery is FLUENT (no stutters, restarts, "
+                    "or repeated words/phrases)."
+                ),
+                criteria=[
+                    "Incoherent — repeated or stuttered words, not a real sentence",
+                    "False start or restart fragment",
+                    "Incomplete — cut off before the thought finishes",
+                    "Complete but with minor disfluency",
+                    "Clean, complete, and fluent delivery",
+                ],
+            )
+        }
+    return _CLEAN_TAKE_QUESTION
+
+
+def score_clean_take_candidate(text: str) -> Optional[Tuple[float, float]]:
+    """Score one candidate transcript for completeness + fluency via JEV.
+
+    Returns (score 0..4, confidence 0..1), or None if JEV is unavailable.
+    When `enable_mock_jev` is set, results are cached/replayed per the same
+    record-on-success contract as the whisper cache (fail-loud logging).
+    """
+    client = _get_jev_client()
+    if client is None:
+        return None
+
+    cache_file = None
+    if getattr(settings, "enable_mock_jev", False):
+        key = hashlib.sha256(f"clean_take|{text.strip().lower()}".encode()).hexdigest()
+        cache_file = os.path.join(settings.mock_llm_dir, f"jev_{key}.json")
+        if os.path.exists(cache_file):
+            logger.info(f"[MOCKED JEV] Replaying cached clean-take score for {text[:40]!r}")
+            try:
+                with open(cache_file) as f:
+                    d = json.load(f)
+                return float(d["score"]), float(d["confidence"])
+            except Exception as e:
+                logger.warning(f"Failed to load JEV cache {cache_file}: {e}")
+        else:
+            logger.info(f"[REAL JEV] Cache miss for {text[:40]!r} — calling TypeSafe")
+
+    try:
+        r = client.system_one(state={"candidate": {"transcript": text}},
+                              questions=_clean_take_question())
+        s = r.scores["fluent_complete"]
+        result = (float(s.score), float(s.confidence))
+    except Exception as e:
+        logger.error(f"JEV clean-take scoring failed for {text[:40]!r}: {e}")
+        return None
+
+    if cache_file is not None:
+        try:
+            os.makedirs(settings.mock_llm_dir, exist_ok=True)
+            with open(cache_file, "w") as f:
+                json.dump({"score": result[0], "confidence": result[1], "text": text}, f)
+        except Exception as e:
+            logger.warning(f"Failed to write JEV cache {cache_file}: {e}")
+
+    return result
+
 
 def check_is_explicit_retake_jev(transcript: str) -> bool:
     """Use JEV to check if the transcript starts with an explicit self-correction marker.
