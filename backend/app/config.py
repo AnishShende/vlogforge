@@ -69,6 +69,8 @@ class Settings(BaseSettings):
     # Phase 1+2 Feature Flags
     enable_word_timeline_redundancy: bool = False
     enable_forced_alignment: bool = True   # refine Whisper word times via WhisperX
+    enable_word_grid: bool = False         # Archdoc Phase 1: build the word grid; transcripts keep
+                                           # conf, interpolated + recovered words, temperature 0 (whisper cache v3)
                                            # (wav2vec2); no-op if whisperx missing
 
     model_config = SettingsConfigDict(

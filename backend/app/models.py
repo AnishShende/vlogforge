@@ -120,6 +120,73 @@ class EGTDocument(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Word Grid — the time reference for speech edits (Archdoc Stage 4)
+# ---------------------------------------------------------------------------
+
+# Word flags. Set by the grid builder / speech-activity checks, never by the ASR.
+WORD_FLAG_INTERPOLATED = "interpolated"   # aligner gave no time; interpolated between neighbours
+WORD_FLAG_ZERO_LENGTH = "zero_length"     # start == end as delivered by the ASR
+WORD_FLAG_ON_SILENCE = "on_silence"       # word sits on audio with no detected speech
+WORD_FLAG_LONG_SPAN = "long_span"         # aligned span implausibly long for the word
+WORD_FLAG_LOW_CONF = "low_conf"           # ASR/aligner confidence below threshold
+WORD_FLAG_RECOVERED = "recovered"         # added by re-transcribing speech the first pass missed
+
+
+def generate_word_id(source_file: str, index: int) -> str:
+    """Deterministic word ID: w_<first 8 hex of SHA-256(source_file)>_<index in file>.
+
+    Stable for a given transcript of a given file. A different transcript (new ASR)
+    yields a new grid; edit plans must record which grid they reference.
+    """
+    file_hash = hashlib.sha256(source_file.encode()).hexdigest()[:8]
+    return f"w_{file_hash}_{index:05d}"
+
+
+class Word(BaseModel):
+    """One spoken word on the source timeline."""
+
+    id: str
+    text: str
+    source_file: str
+    start: float
+    end: float
+    conf: Optional[float] = None                        # None when the ASR output had no confidence
+    gap_before: float = 0.0                             # silence since the previous word in this file
+    flags: List[str] = Field(default_factory=list)
+
+
+class WordGrid(BaseModel):
+    """All words of a job, per file in time order. Edits reference word IDs."""
+
+    words: List[Word] = Field(default_factory=list)
+    asr: Dict = Field(default_factory=dict)             # provenance: model, aligner, cache version
+    checks: Dict = Field(default_factory=dict)          # speech-activity check results (coverage, flag counts)
+
+    def validate_integrity(self) -> List[str]:
+        """Check IDs and timeline invariants. Returns a list of error messages (empty = OK)."""
+        errors = []
+        seen_ids = set()
+        prev_by_file: Dict[str, Word] = {}
+        for w in self.words:
+            if w.id in seen_ids:
+                errors.append(f"Duplicate word id: {w.id}")
+            seen_ids.add(w.id)
+            if w.end < w.start:
+                errors.append(f"Invalid timestamps for {w.id}: start={w.start}, end={w.end}")
+            prev = prev_by_file.get(w.source_file)
+            if prev is not None:
+                if w.start < prev.end - 1e-6:
+                    errors.append(f"Overlap: {prev.id} ends {prev.end} after {w.id} starts {w.start}")
+                if abs(w.gap_before - (w.start - prev.end)) > 1e-3:
+                    errors.append(f"gap_before mismatch for {w.id}: {w.gap_before} vs {w.start - prev.end:.3f}")
+            prev_by_file[w.source_file] = w
+        return errors
+
+    def by_id(self) -> Dict[str, Word]:
+        return {w.id: w for w in self.words}
+
+
+# ---------------------------------------------------------------------------
 # Edit Decision List (EDL) — Pass 2 Reasoning Output
 # ---------------------------------------------------------------------------
 
