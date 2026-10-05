@@ -216,6 +216,25 @@ def classify_segment_jev(
 
     questions = _build_segment_questions()
 
+    # Mock layer (eval/dev only): same record-on-success contract as the clean-take
+    # cache. Keyed on the exact request state; bump the version if questions change.
+    cache_file = None
+    if getattr(settings, "enable_mock_jev", False):
+        key = hashlib.sha256(
+            f"segment_v1|{json.dumps(state, sort_keys=True)}".encode()
+        ).hexdigest()
+        cache_file = os.path.join(settings.mock_llm_dir, f"jev_segment_{key}.json")
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file) as f:
+                    cached = json.load(f)
+                logger.info(f"[MOCKED JEV] Replaying cached segment classification for {segment_dict.get('clip_id', '?')}")
+                return cached
+            except Exception as e:
+                logger.warning(f"Failed to load JEV cache {cache_file}: {e}")
+        else:
+            logger.info(f"[REAL JEV] Cache miss for segment {segment_dict.get('clip_id', '?')} — calling TypeSafe")
+
     try:
         response = client.system_one(state=state, questions=questions)
 
@@ -243,7 +262,7 @@ def classify_segment_jev(
             f"cue={has_cue_noul:.2f}"
         )
 
-        return {
+        result = {
             "segment_type": segment_type,
             "segment_type_confidence": segment_type_confidence,
             "is_bad_take_noul": is_bad_take_noul,
@@ -254,6 +273,16 @@ def classify_segment_jev(
             "structural_cue": None,  # JEV can't generate text; code infers from transcript
             "perception_model": model_version,
         }
+
+        if cache_file is not None:
+            try:
+                os.makedirs(settings.mock_llm_dir, exist_ok=True)
+                with open(cache_file, "w") as f:
+                    json.dump(result, f)
+            except Exception as e:
+                logger.warning(f"Failed to write JEV cache {cache_file}: {e}")
+
+        return result
 
     except TypeSafeError as e:
         logger.error(f"JEV API error for segment {segment_dict.get('clip_id', '?')}: {e}")

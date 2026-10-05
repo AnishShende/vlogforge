@@ -38,20 +38,20 @@ TARGET_DURATION = 60.0   # match the real frontend jobs (10s drops most clips)
 CONTEXT_TEXT = ""
 
 
-def build_egt():
+def build_egt(video=VIDEO, job_dir=JOB_DIR, target_duration=TARGET_DURATION, context_text=CONTEXT_TEXT):
     """Run the real perception stages (mocked) and return the EGTDocument.
 
-    Exposed so experiments/tests can reuse the real EGT for this video without
-    duplicating the stage wiring.
+    Exposed so experiments/tests/eval tools can reuse the real EGT for any clip
+    without duplicating the stage wiring. Defaults reproduce the IMG_1614 run.
     """
-    assert os.path.exists(VIDEO), f"Test video not found: {VIDEO}"
+    assert os.path.exists(video), f"Test video not found: {video}"
     print(f"mock_llm_dir={settings.mock_llm_dir}")
-    print(f"video={VIDEO}")
+    print(f"video={video}")
 
     # ---- Stage 1: Ingest (proxy, audio, scene detection, keyframes) ----
-    result = ingest_video(VIDEO, JOB_DIR)
+    result = ingest_video(video, job_dir)
     file_info = result["file_info"].model_dump()
-    file_info["cfr_path"] = result.get("cfr_path", VIDEO)
+    file_info["cfr_path"] = result.get("cfr_path", video)
     files_info = [file_info]
     all_segments = list(result["segments"])
     total_raw_duration = result["file_info"].duration
@@ -70,11 +70,11 @@ def build_egt():
     # ---- Stage 3a/3a.5: speech-gap refinement + editorial subdivision ----
     dynamic_long_scene = max(
         settings.long_scene_floor_sec,
-        TARGET_DURATION * settings.long_scene_ratio,
+        target_duration * settings.long_scene_ratio,
     )
     dynamic_speech_gap = settings.speech_gap_floor_sec
     cfr_path = file_info.get("cfr_path", "")
-    keyframes_dir = os.path.join(JOB_DIR, "keyframes")
+    keyframes_dir = os.path.join(job_dir, "keyframes")
     if cfr_path and os.path.exists(cfr_path):
         all_segments = subdivide_by_speech_gaps(
             segments=all_segments,
@@ -83,22 +83,22 @@ def build_egt():
             speech_gap_sec=dynamic_speech_gap,
             video_path=cfr_path,
             keyframes_dir=keyframes_dir,
-            context_notes=CONTEXT_TEXT,
+            context_notes=context_text,
         )
     all_segments = editorial_subdivide(
         segments=all_segments,
         transcript_segments=full_transcript_segments,
-        target_duration=TARGET_DURATION,
+        target_duration=target_duration,
         files_info=files_info,
-        job_dir=JOB_DIR,
+        job_dir=job_dir,
     )
     print(f"[subdivide] {len(all_segments)} segments after subdivision")
 
     # ---- Stage 3b: visual analysis (mocked) ----
     analysis_result = analyze_segments(
         segments=all_segments,
-        user_context=CONTEXT_TEXT,
-        job_dir=JOB_DIR,
+        user_context=context_text,
+        job_dir=job_dir,
         files_info=files_info,
     )
     all_segments = analysis_result["segments"]
@@ -122,11 +122,11 @@ def build_egt():
     ctx = {
         "files_info": files_info,
         "full_transcript_segments": full_transcript_segments,
-        "job_dir": JOB_DIR,
+        "job_dir": job_dir,
         "total_raw_duration": total_raw_duration,
         "context_summary": context_summary,
-        "target_duration": TARGET_DURATION,
-        "context_text": CONTEXT_TEXT,
+        "target_duration": target_duration,
+        "context_text": context_text,
     }
     return egt_doc, ctx
 
