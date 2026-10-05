@@ -43,3 +43,6 @@ mocks/
 *.avi
 *.edl
 *.ffindex
+backend/eval/drift/_out/
+eval-set/
+Archdoc.txt
