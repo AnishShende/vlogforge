@@ -1,20 +1,53 @@
-import logging
-from typing import List, Dict, Optional
-from dataclasses import dataclass
-import sys
-import os
+"""Audio-first, word-level clean-take selection (flag-gated diagnostic).
 
-from app.models import EGTDocument, EGTSegment
-from app.config import settings
-from app.tasks.retake_detect import (
-    get_embedding_model, 
-    compute_cosine_similarity, 
-    _build_clusters,
-    reconstruct_utterances
-)
-from app.utils.jev import check_is_explicit_retake_jev
+Design (see docs/SPEECH_FIRST_DESIGN.md):
+  The word timeline is the unit of selection for speech. Segments are ignored
+  here. The algorithm is punctuation-free and relies only on word text + timing.
+
+  1. Build a flat word timeline from the EGT.
+  2. Candidate generation: cheap pre-split at small silences, then within each
+     chunk emit MAXIMAL FLUENT RUNS — maximal spans with no internal repeated
+     n-gram — seeded at the chunk start and at every restart (a position where
+     an n-gram recurs). Retake attempts and the final clean delivery all appear
+     as candidates; the final delivery survives intact because it has no
+     internal repeat.
+  3. Group candidates by CONTENT similarity (opening + whole-text embeddings),
+     not by silence — silence cannot separate retakes from distinct ideas.
+  4. Per group keep the LONGEST fluent run (most complete; completeness is
+     relative, no punctuation), tie-broken by latest start. Singletons kept.
+  5. Drop leftover scraps that are substrings of a kept span. A group whose
+     winner is still only a short fragment is kept but flagged `no-clean-take`.
+
+  Every candidate ends up kept or dropped; span accounting asserts this.
+
+NOT wired into the orchestrator/EDL/assembly (that is Phase 3, blocked).
+"""
+import logging
+import re
+from typing import List, Dict, Callable, Optional, Tuple
+from dataclasses import dataclass, field
+
+from app.models import EGTDocument
+from app.tasks.retake_detect import get_embedding_model, compute_cosine_similarity
 
 logger = logging.getLogger("VlogForge.WordTimeline")
+
+# --- Tunables (validated against the real IMG_1614 transcript) --------------
+PRESPLIT_GAP_SEC = 2.0     # break runs only on genuine idea gaps; small within-
+                           # delivery pauses must NOT chop a fluent take. NOT the
+                           # grouping rule (grouping is by content).
+NGRAM = 4                  # repeated 4-gram marks a stutter/restart
+MIN_WORDS = 6              # floor for a candidate to be considered a span
+MAX_CLEAN_WORD_GAP_SEC = 1.0   # consecutive words must be ~back-to-back; a bigger
+                               # gap means stutter/dead-air between them, so the
+                               # FFmpeg cut would play it. Required for the span's
+                               # time bounds to match clean audio (handoff rule).
+MAX_WORD_DURATION_SEC = 2.0    # a single token longer than this is a Whisper
+                               # stretch artifact (dead air / stutter collapsed
+                               # into one word); never include it in a clean run.
+SIMILARITY = 0.72          # opening/whole cosine sim to call two spans the same line
+CLEAN_TAKE_MIN_SCORE = 3.0  # winner completeness+fluency score below this => no-clean-take
+
 
 @dataclass
 class WordTimelineEntry:
@@ -22,376 +55,434 @@ class WordTimelineEntry:
     start_sec: float
     end_sec: float
     source_file: str
-    visual_description: str
     has_speech: bool
-    is_bad_take: bool
-    is_superseded_take: bool
-    is_stutter_repeat: bool
     quality_score: float
 
-def build_word_timeline(egt_doc: EGTDocument) -> List[WordTimelineEntry]:
-    timeline = []
-    # Segments are inherently ordered by time in EGTDocument
-    segments = sorted(egt_doc.segments, key=lambda s: (s.source_file, s.start_sec))
-    for seg in segments:
-        for wt in seg.word_timings:
-            timeline.append(WordTimelineEntry(
-                word=wt.get("text", wt.get("word", "")).strip(),
-                start_sec=wt.get("start", 0.0),
-                end_sec=wt.get("end", 0.0),
-                source_file=seg.source_file,
-                visual_description=seg.visual_description,
-                has_speech=seg.has_speech,
-                is_bad_take=seg.is_bad_take,
-                is_superseded_take=getattr(seg, "is_superseded_take", False),
-                is_stutter_repeat=getattr(seg, "is_stutter_repeat", False),
-                quality_score=seg.quality_score
-            ))
-    # Ensure chronological order
-    timeline.sort(key=lambda x: (x.source_file, x.start_sec))
-    return timeline
 
 @dataclass
 class WordSpan:
-    words: List[WordTimelineEntry]
-    
+    words: List[WordTimelineEntry] = field(default_factory=list)
+    chunk_id: int = -1   # silence-delimited idea region this span came from
+
     @property
     def source_file(self) -> str:
         return self.words[0].source_file if self.words else ""
-    
+
     @property
     def start_sec(self) -> float:
         return self.words[0].start_sec if self.words else 0.0
-        
+
     @property
     def end_sec(self) -> float:
         return self.words[-1].end_sec if self.words else 0.0
-        
-    @property
-    def full_transcript(self) -> str:
-        return " ".join(w.word for w in self.words).strip()
-        
-    def is_complete(self) -> bool:
-        """
-        A span is complete if it ends on terminal punctuation.
-        """
-        if not self.words:
-            return False
-        last_word = self.words[-1].word
-        return any(last_word.endswith(punct) for punct in [".", "!", "?"])
 
-def generate_candidate_spans_from_utterances(egt_doc: EGTDocument, timeline: List[WordTimelineEntry]) -> List[WordSpan]:
+    @property
+    def text(self) -> str:
+        return " ".join(w.word for w in self.words).strip()
+
+
+def build_word_timeline(egt_doc: EGTDocument) -> List[WordTimelineEntry]:
+    """Flatten all EGT segments' word timings into one chronological stream."""
+    timeline = []
+    segments = sorted(egt_doc.segments, key=lambda s: (s.source_file, s.start_sec))
+    for seg in segments:
+        for wt in seg.word_timings:
+            word = wt.get("text", wt.get("word", "")).strip()
+            if not word:
+                continue
+            timeline.append(WordTimelineEntry(
+                word=word,
+                start_sec=wt.get("start", 0.0),
+                end_sec=wt.get("end", 0.0),
+                source_file=seg.source_file,
+                has_speech=seg.has_speech,
+                quality_score=seg.quality_score,
+            ))
+    timeline.sort(key=lambda x: (x.source_file, x.start_sec))
+    return timeline
+
+
+def _norm(w: str) -> str:
+    return re.sub(r"[^\w\s]", "", w.lower())
+
+
+def _has_internal_repeat(words: List[WordTimelineEntry], n: int = NGRAM) -> bool:
+    nw = [_norm(w.word) for w in words]
+    seen = set()
+    for i in range(len(nw) - n + 1):
+        g = tuple(nw[i:i + n])
+        if g in seen:
+            return True
+        seen.add(g)
+    return False
+
+
+def _chunk_by_gap(timeline: List[WordTimelineEntry], gap: float) -> List[List[WordTimelineEntry]]:
+    chunks, cur = [], []
+    for w in timeline:
+        if cur and (w.source_file != cur[-1].source_file
+                    or (w.start_sec - cur[-1].end_sec) >= gap):
+            chunks.append(cur)
+            cur = []
+        cur.append(w)
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+def _maximal_fluent_runs(chunk: List[WordTimelineEntry]) -> List[List[WordTimelineEntry]]:
+    """Emit maximal spans with no internal repeated n-gram.
+
+    Seeds: the chunk start and every restart position (where an n-gram recurs).
+    From each seed, extend until adding a word would complete a repeated n-gram
+    inside the run. The final clean delivery is seeded at the last restart and
+    extends to the chunk end, so it survives as one full candidate.
     """
-    Generate candidate spans over the word timeline that match today's utterance reconstruction.
-    """
-    utterances = reconstruct_utterances(egt_doc.segments)
-    spans = []
-    for u in utterances:
-        span_words = []
-        for seg in u.segments:
-            for wt in seg.word_timings:
-                w_start = wt.get("start", 0.0)
-                # Find matching entry in timeline
-                for t in timeline:
-                    if t.source_file == seg.source_file and abs(t.start_sec - w_start) < 0.01:
-                        span_words.append(t)
-                        break
-        if span_words:
-            spans.append(WordSpan(words=span_words))
+    nw = [_norm(w.word) for w in chunk]
+    n = len(chunk)
+    seeds = {0}
+    seen = {}
+    for i in range(n - NGRAM + 1):
+        g = tuple(nw[i:i + NGRAM])
+        if g in seen:
+            seeds.add(i)           # a restart begins here
+        else:
+            seen[g] = i
+
+    runs = []
+    for s in sorted(seeds):
+        local = set()
+        e = s
+        while e < n:
+            # Temporal contiguity: a clean run's words must be back-to-back in
+            # time. A larger inter-word gap is stutter/dead-air the cut would
+            # otherwise play, so the run ends here.
+            if e > s and (chunk[e].start_sec - chunk[e - 1].end_sec) > MAX_CLEAN_WORD_GAP_SEC:
+                break
+            # A single over-long token is a Whisper stretch artifact (dead air /
+            # stutter collapsed into one word) — stop before including it.
+            if (chunk[e].end_sec - chunk[e].start_sec) > MAX_WORD_DURATION_SEC:
+                break
+            if e - s >= NGRAM - 1:
+                g = tuple(nw[e - NGRAM + 1:e + 1])
+                if g in local:
+                    break          # would repeat inside this run -> stop before e
+                local.add(g)
+            e += 1
+        runs.append(chunk[s:e])
+    return runs
+
+
+def _generate_candidates(timeline: List[WordTimelineEntry]) -> List[WordSpan]:
+    runs = []  # (chunk_id, run)
+    for chunk_id, chunk in enumerate(_chunk_by_gap(timeline, PRESPLIT_GAP_SEC)):
+        for run in _maximal_fluent_runs(chunk):
+            if len(run) >= MIN_WORDS:
+                runs.append((chunk_id, run))
+
+    # Candidate reduction (cuts downstream JEV call volume). The restart-seeded
+    # generator emits many overlapping runs that share an end word (left
+    # extensions). Keep only the LONGEST run per distinct (source_file, end)
+    # position, then drop exact-text duplicates. We deliberately do NOT
+    # substring-prune across different ends — that once hid a clean take behind
+    # a longer junk superset.
+    by_end = {}
+    for chunk_id, run in runs:
+        key = (run[-1].source_file, round(run[-1].end_sec, 3))
+        if key not in by_end or len(run) > len(by_end[key][1]):
+            by_end[key] = (chunk_id, run)
+
+    spans, seen_text = [], set()
+    for chunk_id, run in sorted(by_end.values(), key=lambda cr: (cr[1][0].source_file, cr[1][0].start_sec)):
+        norm_text = " ".join(_norm(w.word) for w in run)
+        if norm_text not in seen_text:
+            seen_text.add(norm_text)
+            spans.append(WordSpan(words=list(run), chunk_id=chunk_id))
     return spans
 
-def detect_redundancy_on_timeline(egt_doc: EGTDocument) -> Dict:
-    timeline = build_word_timeline(egt_doc)
-    candidate_spans = generate_candidate_spans_from_utterances(egt_doc, timeline)
-    
-    edges = []
-    
-    # FIX 2: Trim-to-last-clean-run repetition check
-    MIN_CLEAN_WORDS = 8
-    NGRAM_SIZE = 4
-    # Maximum inter-word gap (seconds) to still consider two words temporally
-    # contiguous. Normal speech inter-word gaps are 0.05–0.3s. Whisper's VAD
-    # already splits at min_silence_duration_ms=500, so anything >0.5s that
-    # survives as a single "word" timing is hesitation/stutter padding.
-    # 0.6s gives comfortable headroom above normal pauses while catching
-    # the pathological 5–7s gaps left when repeated content is excised.
-    MAX_CLEAN_WORD_GAP_SEC = 0.6
-    
-    import re
-    def normalize_word(w: str) -> str:
-        return re.sub(r'[^\w\s]', '', w.lower())
 
-    trimmed_spans = []
-    for span in candidate_spans:
-        if not span.words:
+def _group_by_content(spans: List[WordSpan]) -> List[List[int]]:
+    """Union-find groups over opening/whole-text embedding similarity.
+    Returns groups of indices, INCLUDING singletons."""
+    n = len(spans)
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    if n > 1:
+        whole = [s.text.lower() for s in spans]
+        opens = [" ".join(s.text.split()[:6]).lower() for s in spans]
+        try:
+            model = get_embedding_model()
+            we = model.encode(whole)
+            oe = model.encode(opens)
+        except Exception as e:
+            logger.error(f"Embedding failed, grouping on chunk membership only: {e}")
+            we = oe = None
+        for i in range(n):
+            for j in range(i + 1, n):
+                if spans[i].source_file != spans[j].source_file:
+                    continue
+                # Same-idea edge via a UNION of signals:
+                #  - same silence-delimited chunk (one idea region fragmented by
+                #    Whisper into several contiguous pieces), OR
+                #  - opening / whole-text embedding similarity (retakes of one
+                #    line spread across chunks, e.g. separated by a long pause).
+                same_chunk = spans[i].chunk_id == spans[j].chunk_id
+                similar = we is not None and (
+                    compute_cosine_similarity(oe[i], oe[j]) >= SIMILARITY or
+                    compute_cosine_similarity(we[i], we[j]) >= SIMILARITY
+                )
+                if same_chunk or similar:
+                    parent[find(i)] = find(j)
+
+    groups = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+    return list(groups.values())
+
+
+# --- Winner selection: JEV completeness+fluency judgment -------------------
+# This is the "small call" of the hybrid: lexical generates/groups candidates
+# deterministically; JEV judges which one is the clean complete take (score
+# 0..4, confidence 0..1). The JEV call + mock cache live in app.utils.jev.
+# Punctuation plays no role.
+
+
+def _jev_scorer() -> Optional[Callable[[str], Tuple[float, float]]]:
+    """Return a JEV-backed scorer callable, or None if JEV is unavailable."""
+    from app.utils.jev import jev_available, score_clean_take_candidate
+    if not jev_available():
+        return None
+
+    def score(text: str) -> Tuple[float, float]:
+        result = score_clean_take_candidate(text)
+        # jev_available() was true; a None here means a transient call failure —
+        # treat as lowest score so a flaky candidate never wins silently.
+        return result if result is not None else (0.0, 0.0)
+
+    return score
+
+
+def _lexical_scorer(text: str) -> Tuple[float, float]:
+    """Deterministic fallback when JEV is unavailable. Fails loud via caller log.
+    Scores by word count minus a local-repetition penalty (normalized to ~0..4)."""
+    words = text.split()
+    nw = [_norm(w) for w in words]
+    reps = 0
+    seen = {}
+    for i in range(len(nw) - 2):
+        g = tuple(nw[i:i + 3])
+        if g in seen and i - seen[g] <= 10:
+            reps += 1
+        seen[g] = i
+    penalty = min(4.0, reps * 0.5)
+    return max(0.0, min(4.0, len(words) / 8.0)) - penalty, 0.0
+
+
+def detect_redundancy_on_timeline(
+    egt_doc: EGTDocument,
+    scorer: Optional[Callable[[str], Tuple[float, float]]] = None,
+) -> Dict:
+    timeline = build_word_timeline(egt_doc)
+    spans = _generate_candidates(timeline)
+    total_candidates = len(spans)
+
+    # Next-word-start lookup, per source file. Used to cap a span's end so the
+    # cut can't overrun into the next spoken word: when the speaker leaves no
+    # pause (e.g. a restart right after the final word), the aligner stretches
+    # that last word's end across the following audio, and cutting at it would
+    # play the next word. Capping at the next word's onset trims that bleed
+    # without clipping the kept word.
+    next_start = {}
+    for a, b in zip(timeline, timeline[1:]):
+        if a.source_file == b.source_file:
+            next_start[id(a)] = b.start_sec
+
+    def _capped_end(span: WordSpan) -> float:
+        lw = span.words[-1]
+        nxt = next_start.get(id(lw))
+        return min(lw.end_sec, nxt) if nxt is not None else lw.end_sec
+
+    groups = _group_by_content(spans)
+
+    # Winner selection (the hybrid's "small call"): JEV judges completeness +
+    # fluency per candidate; code picks the argmax. Injectable for hermetic
+    # tests. Falls back loudly to a deterministic lexical scorer if JEV is down.
+    if scorer is None:
+        scorer = _jev_scorer()
+        if scorer is None:
+            logger.warning("JEV unavailable — falling back to deterministic lexical scorer")
+            scorer = _lexical_scorer
+
+    kept = []
+    dropped = []
+    for members in groups:
+        # Dedup exact-text duplicates only (saves scorer calls); never prune by
+        # substring — that once hid the clean take behind a longer junk superset.
+        seen, distinct = set(), []
+        for m in members:
+            key = _norm(spans[m].text)
+            if key not in seen:
+                seen.add(key)
+                distinct.append(m)
+
+        scored = []
+        for m in distinct:
+            s, c = scorer(spans[m].text)
+            scored.append((s, c, len(spans[m].words), spans[m].start_sec, m))
+        scored.sort(reverse=True)
+        win_score, win_conf, _, _, win = scored[0]
+
+        flags = []
+        if win_score < CLEAN_TAKE_MIN_SCORE:
+            flags.append("no-clean-take")
+        w = spans[win]
+        end = _capped_end(w)
+        wt = [{"word": x.word, "start": x.start_sec, "end": x.end_sec} for x in w.words]
+        if wt:
+            wt[-1]["end"] = min(wt[-1]["end"], end)  # keep word_timings consistent
+        kept.append({
+            "source_file": w.source_file,
+            "start": w.start_sec,
+            "end": end,
+            "text": w.text,
+            "word_timings": wt,
+            "word_count": len(w.words),
+            "duration": round(end - w.start_sec, 3),
+            "group_size": len(members),
+            "score": round(win_score, 3),
+            "confidence": round(win_conf, 3),
+            "flags": flags,
+        })
+        for m in members:
+            if m != win:
+                dropped.append({
+                    "start": spans[m].start_sec,
+                    "end": spans[m].end_sec,
+                    "text": spans[m].text,
+                    "reason": "superseded-in-group",
+                })
+
+    kept.sort(key=lambda k: k["start"])
+
+    # --- Span conservation accounting (permanent, fail-loud) ---------------
+    accounting = {
+        "total_candidates": total_candidates,
+        "kept": len(kept),
+        "dropped": len(dropped),
+    }
+    logger.info(
+        f"SPAN ACCOUNTING: total_candidates={total_candidates} "
+        f"kept={len(kept)} dropped={len(dropped)}"
+    )
+    assert len(kept) + len(dropped) == total_candidates, (
+        f"Span accounting leak: {total_candidates} candidates != "
+        f"{len(kept)} kept + {len(dropped)} dropped"
+    )
+
+    return {"kept": kept, "dropped": dropped, "accounting": accounting}
+
+
+WORD_TIMELINE_MODEL = "word-timeline-jev"
+
+
+def clamp_edl_to_word_timeline(edl, egt_doc: EGTDocument) -> int:
+    """Restore the exact clean bounds on EDL entries that reference word-timeline
+    pseudo-segments, overriding any trim the LLM reasoner or the word-snap pass
+    applied. The word-timeline span IS the cut decision; the reasoner may only
+    select/order/type these clips, never move their start/end. Returns the count
+    of clamped entries. Non-speech/B-roll entries are left untouched.
+    """
+    bounds = {
+        seg.clip_id: (seg.start_sec, seg.end_sec)
+        for seg in egt_doc.segments
+        if seg.perception_model == WORD_TIMELINE_MODEL
+    }
+    n = 0
+    for entry in edl:
+        b = bounds.get(entry.get("clip_id"))
+        if b is None:
             continue
-            
-        norm_words = [normalize_word(w.word) for w in span.words]
-        marked = [False] * len(span.words)
-        
-        # Mark every word that is part of a repeated n-gram 
-        # (i.e. occurs verbatim at an earlier position in the same span)
-        for i in range(len(norm_words) - NGRAM_SIZE + 1):
-            ngram = norm_words[i:i+NGRAM_SIZE]
-            for j in range(i + 1, len(norm_words) - NGRAM_SIZE + 1):
-                if norm_words[j:j+NGRAM_SIZE] == ngram:
-                    for k in range(j, j+NGRAM_SIZE):
-                        marked[k] = True
-                        
-        # Build temporally-contiguous runs of UNMARKED words.
-        # Two consecutive unmarked words are only in the same run if:
-        #   1. They are adjacent in the word list (no marked word between them), AND
-        #   2. The temporal gap between them is <= MAX_CLEAN_WORD_GAP_SEC
-        all_runs = []
-        current_run_indices = []
-        for i, is_marked in enumerate(marked):
-            if not is_marked:
-                if current_run_indices:
-                    # Check temporal contiguity with the previous word in this run
-                    prev_idx = current_run_indices[-1]
-                    gap = span.words[i].start_sec - span.words[prev_idx].end_sec
-                    if gap > MAX_CLEAN_WORD_GAP_SEC:
-                        # Temporal break — finalize current run, start new one
-                        all_runs.append(current_run_indices)
-                        current_run_indices = [i]
-                    else:
-                        current_run_indices.append(i)
-                else:
-                    current_run_indices = [i]
-            else:
-                if current_run_indices:
-                    all_runs.append(current_run_indices)
-                    current_run_indices = []
-        if current_run_indices:
-            all_runs.append(current_run_indices)
-        
-        # Pick the longest temporally-contiguous clean run
-        best_run_indices = max(all_runs, key=len) if all_runs else []
-            
-        # If the clean run is empty or below a minimal word-count floor
-        if len(best_run_indices) < MIN_CLEAN_WORDS:
-            span.has_clean_take = False
-            print(f"  [DEBUG RESCORE] Span '{span.full_transcript[:60]}...' -> has_clean_take=False, NO rescore (original word scores retained)")
-            print(f"    original_word_scores={[w.quality_score for w in span.words]}")
-        else:
-            span.has_clean_take = True
-            # Trim the span to that clean run's word range
-            trimmed_words = [span.words[idx] for idx in best_run_indices]
-            span.words = trimmed_words
-            
-            # Fix 3: Recompute quality score via rule-based heuristic.
-            # The original per-word scores were copied homogeneously from the
-            # parent EGTSegment (e.g. all 0.25 for a bad-take segment), so
-            # averaging them after trimming yields the same stale value.
-            # Build a lightweight EGTSegment from the trimmed words and re-score.
-            from app.tasks.score import compute_quality_score
-            trimmed_text = " ".join(w.word for w in trimmed_words)
-            trimmed_duration = trimmed_words[-1].end_sec - trimmed_words[0].start_sec
-            dummy_seg = EGTSegment(
-                clip_id="trim_rescore",
-                source_file=span.source_file,
-                start_sec=trimmed_words[0].start_sec,
-                end_sec=trimmed_words[-1].end_sec,
-                transcript=trimmed_text,
-                segment_type="SPEECH",
-                has_speech=True,
-                word_timings=[
-                    {"word": w.word, "start": w.start_sec, "end": w.end_sec}
-                    for w in trimmed_words
-                ],
+        start, end = b
+        if entry.get("start_sec") != start or entry.get("end_sec") != end:
+            logger.info(
+                f"Clamp {entry.get('clip_id')}: EDL "
+                f"[{entry.get('start_sec')}-{entry.get('end_sec')}] -> clean [{start}-{end}]"
             )
-            new_score, new_flags = compute_quality_score(dummy_seg)
-            new_score = round(max(0.0, min(1.0, new_score)), 3)
-            print(f"  [DEBUG RESCORE] Span '{trimmed_text[:60]}...'")
-            print(f"    duration={trimmed_duration:.2f}s, word_count={len(trimmed_words)}, marked_count={sum(marked)}")
-            print(f"    original_word_scores={[trimmed_words[0].quality_score]}")
-            print(f"    compute_quality_score() returned: raw_score={new_score}, flags={new_flags}")
-            for w in trimmed_words:
-                w.quality_score = new_score
-            
-        trimmed_spans.append(span)
-            
-    valid_spans = trimmed_spans
-    
-    def get_opening_words(text: str, num_words: int = 5) -> str:
-        return " ".join(text.split()[:num_words]).strip()
-        
-    opening_texts = [get_opening_words(u.full_transcript, 5).lower() for u in valid_spans]
-    whole_texts = [u.full_transcript.lower() for u in valid_spans]
-    
-    is_explicit_marker = []
-    for u in valid_spans:
-        t_opening_jev = get_opening_words(u.full_transcript, 15)
-        if t_opening_jev:
-            is_explicit_marker.append(check_is_explicit_retake_jev(t_opening_jev))
-        else:
-            is_explicit_marker.append(False)
-            
-    try:
-        model = get_embedding_model()
-        valid_indices = [i for i, t in enumerate(opening_texts) if t]
-        if valid_indices:
-            opening_embs = model.encode([opening_texts[i] for i in valid_indices])
-            whole_embs = model.encode([whole_texts[i] for i in valid_indices])
-            emb_map = {idx: (opening_embs[j], whole_embs[j]) for j, idx in enumerate(valid_indices)}
-        else:
-            emb_map = {}
-    except Exception as e:
-        logger.error(f"Embedding failed: {e}")
-        emb_map = {}
-        
-    for i in range(len(valid_spans)):
-        u1 = valid_spans[i]
-        t1 = whole_texts[i]
-        if not t1: continue
-        
-        for j in range(i + 1, len(valid_spans)):
-            u2 = valid_spans[j]
-            t2 = whole_texts[j]
-            if not t2: continue
-            
-            if u1.source_file != u2.source_file:
-                continue
-                
-            gap = u2.start_sec - u1.end_sec
-            if gap < 0 or gap > settings.retake_candidate_window_sec:
-                continue
-                
-            is_match = False
-            if is_explicit_marker[j]:
-                is_match = True
-                
-            if i in emb_map and j in emb_map:
-                o_emb1, w_emb1 = emb_map[i]
-                o_emb2, w_emb2 = emb_map[j]
-                
-                opening_sim = compute_cosine_similarity(o_emb1, o_emb2)
-                if opening_sim >= settings.retake_opening_similarity_threshold:
-                    is_match = True
-                    
-                whole_sim = compute_cosine_similarity(w_emb1, w_emb2)
-                if whole_sim >= settings.retake_whole_utterance_similarity_threshold:
-                    is_match = True
-                    
-            if is_match:
-                edges.append((i, j))
-                
-    clusters = _build_clusters(edges, len(valid_spans))
-    report = []
-    
-    for cluster_indices in clusters:
-        cluster_info = {
-            "cluster_start": valid_spans[cluster_indices[0]].start_sec,
-            "cluster_end": valid_spans[cluster_indices[-1]].end_sec,
-            "candidates": []
-        }
-        
-        # Determine completeness of each candidate
-        complete_candidates = []
-        valid_candidates = []
-        for idx in cluster_indices:
-            span = valid_spans[idx]
-            is_comp = span.is_complete()
-            qs = sum(w.quality_score for w in span.words) / len(span.words) if span.words else 0
-            cluster_info["candidates"].append({
-                "index": idx,
-                "text": span.full_transcript,
-                "start": span.start_sec,
-                "end": span.end_sec,
-                "is_complete": is_comp,
-                "quality_score": qs,
-                "words": [{"word": w.word, "start_sec": w.start_sec, "end_sec": w.end_sec} for w in span.words]
-            })
-            if getattr(span, "has_clean_take", True):
-                valid_candidates.append(idx)
-                if is_comp:
-                    complete_candidates.append((idx, qs))
-                
-        winner_idx = -1
-        winner_reason = ""
-        extended_text = None
-        
-        if not valid_candidates:
-            winner_idx = -1
-            winner_reason = "no-clean-take-found"
-        elif complete_candidates:
-            complete_candidates.sort(
-                key=lambda x: (x[1], len(valid_spans[x[0]].words)),
-                reverse=True
+        entry["start_sec"] = start
+        entry["end_sec"] = end
+        entry["core_start_sec"] = start
+        entry["core_end_sec"] = end
+        n += 1
+    return n
+
+
+def apply_word_timeline_selection(egt_doc: EGTDocument, scorer=None):
+    """Replace the SPEECH portion of an EGT with word-timeline-selected clean
+    takes, keeping non-speech/B-roll segments for the legacy path.
+
+    Returns (new_egt_doc, warnings). Each kept speech span becomes a synthetic
+    SPEECH EGTSegment with a deterministic clip_id and its own word_timings, so
+    the existing EDL reasoner, word-snap, and clip_id anti-hallucination gate
+    work unchanged. `no-clean-take` spans are kept (best fragment) and reported
+    as warnings. `scorer` is forwarded for hermetic tests (defaults to JEV).
+    """
+    from app.models import EGTSegment, generate_clip_id
+
+    report = detect_redundancy_on_timeline(egt_doc, scorer=scorer)
+
+    pseudo_speech = []
+    warnings = []
+    for k in report["kept"]:
+        clip_id = generate_clip_id(k["source_file"], k["start"], k["end"])
+        pseudo_speech.append(EGTSegment(
+            clip_id=clip_id,
+            source_file=k["source_file"],
+            start_sec=k["start"],
+            end_sec=k["end"],
+            transcript=k["text"],
+            word_timings=k["word_timings"],
+            has_speech=True,
+            segment_type="SPEECH",
+            quality_score=k.get("score", 1.0),
+            perception_model=WORD_TIMELINE_MODEL,
+        ))
+        if "no-clean-take" in k["flags"]:
+            warnings.append(
+                f"No clean take for line at {k['start']:.1f}-{k['end']:.1f}s "
+                f"(kept best fragment): {k['text'][:80]!r}"
             )
-            winner_idx = complete_candidates[0][0]
-            
-            # Check if there is a tie in quality score
-            if len(complete_candidates) > 1 and abs(complete_candidates[0][1] - complete_candidates[1][1]) < 0.001:
-                winner_reason = "complete (longest among tied candidates)"
-            else:
-                winner_reason = "complete"
-        else:
-            best_incomplete = max(valid_candidates, key=lambda idx: sum(w.quality_score for w in valid_spans[idx].words)/len(valid_spans[idx].words))
-            best_span = valid_spans[best_incomplete]
-            
-            # Find the start time of the next candidate in the cluster (if any)
-            # to ensure we don't extend INTO another candidate (which means the speaker abandoned this take)
-            next_candidate_start = float('inf')
-            for idx in cluster_indices:
-                if idx > best_incomplete:
-                    next_candidate_start = min(next_candidate_start, valid_spans[idx].start_sec)
-            
-            # Global extension check
-            last_word = best_span.words[-1]
-            try:
-                global_idx = timeline.index(last_word)
-                extended_words = list(best_span.words)
-                extended = False
-                for forward_idx in range(global_idx + 1, len(timeline)):
-                    next_word = timeline[forward_idx]
-                    
-                    if next_word.source_file != last_word.source_file:
-                        break
-                    
-                    # Stop if we hit a speech gap
-                    gap = next_word.start_sec - extended_words[-1].end_sec
-                    if gap >= 1.5:  # utterance gap
-                        break
-                        
-                    # Stop if we hit the next candidate's start time (take was abandoned)
-                    if next_word.start_sec >= next_candidate_start:
-                        break
-                        
-                    extended_words.append(next_word)
-                    if any(next_word.word.endswith(punct) for punct in [".", "!", "?"]):
-                        extended = True
-                        break
-                
-                if extended:
-                    winner_idx = best_incomplete
-                    winner_reason = "extended-to-complete"
-                    extended_text = " ".join(w.word for w in extended_words).strip()
-                    # It returns a single span, so we update the candidate's end_sec
-                    for cand in cluster_info["candidates"]:
-                        if cand["index"] == winner_idx:
-                            cand["end"] = extended_words[-1].end_sec
-                else:
-                    winner_idx = -1
-                    winner_reason = "no-clean-take-found"
-            except ValueError:
-                winner_idx = -1
-                winner_reason = "no-clean-take-found"
-                
-        cluster_info["winner_index"] = winner_idx
-        cluster_info["winner_reason"] = winner_reason
-        if extended_text:
-            cluster_info["extended_text"] = extended_text
-        report.append(cluster_info)
-        
-    dropped_content = []
-    for span in candidate_spans:
-        if not getattr(span, "has_clean_take", True):
-            dropped_content.append({
-                "start": span.words[0].start_sec if hasattr(span, "words") and span.words else span.start_sec,
-                "end": span.words[-1].end_sec if hasattr(span, "words") and span.words else span.end_sec,
-                "text": span.full_transcript,
-                "reason": "below-minimal-word-count-floor-after-trim"
-            })
-        
-    return {"clusters": report, "dropped_content": dropped_content}
+
+    # Carry over only TRUE B-roll: segments the classifier explicitly typed
+    # B_ROLL. We must NOT use `has_speech == False` as the B-roll test — a
+    # stutter region Whisper under-transcribed (<3 words, or none) also has
+    # has_speech=False, and carrying it resurrects exactly the unintelligible
+    # speech the word-timeline dropped. Real B-roll is a visual classification,
+    # not a word-count artifact; speech-region leftovers are intentionally
+    # discarded (their clean words were already the word-timeline's job).
+    non_speech = [
+        seg for seg in egt_doc.segments
+        if seg.segment_type == "B_ROLL"
+        and not seg.is_bad_take
+    ]
+
+    merged = sorted(pseudo_speech + non_speech,
+                    key=lambda s: (s.source_file, s.start_sec))
+    logger.info(
+        f"Word-timeline selection: {len(pseudo_speech)} clean speech takes + "
+        f"{len(non_speech)} non-speech segments ({len(warnings)} no-clean-take)"
+    )
+
+    new_doc = EGTDocument(
+        segments=merged,
+        total_duration_sec=egt_doc.total_duration_sec,
+        source_file_count=egt_doc.source_file_count,
+        context_summary=egt_doc.context_summary,
+        perception_model_version=egt_doc.perception_model_version,
+    )
+    return new_doc, warnings

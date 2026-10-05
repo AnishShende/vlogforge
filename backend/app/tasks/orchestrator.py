@@ -38,6 +38,7 @@ from app.tasks.analyze import analyze_segments
 from app.tasks.score import score_segments, recompute_bad_takes
 from app.tasks.egt import build_egt_document, egt_to_serializable
 from app.tasks.retake_detect import detect_and_resolve_retakes
+from app.tasks.word_timeline_redundancy import apply_word_timeline_selection, clamp_edl_to_word_timeline
 from app.tasks.edl import generate_edl
 from app.tasks.assemble import assemble_vlog
 from app.tasks.metadata import generate_metadata
@@ -390,6 +391,19 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
         safe_broadcast("classifying", 65, "Detecting and clustering retakes...")
         egt_doc = detect_and_resolve_retakes(egt_doc)
 
+        # ---- Stage 5.6: Word-timeline clean-take selection (flag-gated) ----
+        # Replaces the SPEECH portion of the EGT with punctuation-free,
+        # JEV-judged clean takes (one per distinct line), keeping non-speech /
+        # B-roll for the legacy path. Downstream EDL/word-snap/assembly consume
+        # the synthetic clip_ids unchanged.
+        if settings.enable_word_timeline_redundancy:
+            check_cancelled()
+            safe_broadcast("classifying", 66, "Selecting clean takes from the word timeline...")
+            egt_doc, wt_warnings = apply_word_timeline_selection(egt_doc)
+            all_segments = egt_doc.segments  # keep segments_by_clip_id / egt_clip_ids consistent
+            if wt_warnings and job_id in jobs_db:
+                jobs_db[job_id].warnings.extend(wt_warnings)
+
         # Store EGT and transcript data
         jobs_data_db[job_id] = {
             "egt": egt_to_serializable(egt_doc),
@@ -422,6 +436,13 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
             seg.clip_id: seg.model_dump() for seg in all_segments
         }
         edl = snap_edl_to_word_boundaries(edl, segments_by_clip_id)
+
+        # When word-timeline selection is on, its spans ARE the cut decision.
+        # Restore their exact bounds so the LLM reasoner / word-snap cannot move
+        # the cut points (which otherwise slices into real speech mid-sentence).
+        if settings.enable_word_timeline_redundancy:
+            clamped = clamp_edl_to_word_timeline(edl, egt_doc)
+            logger.info(f"Word-timeline: clamped {clamped} EDL entries to clean span bounds")
 
         jobs_data_db[job_id]["edl"] = edl
         jobs_data_db[job_id]["reasoning_mode"] = reasoning_mode

@@ -34,6 +34,15 @@ def build_egt_document(
     Raises:
         ValueError: If integrity validation fails with critical errors.
     """
+    # Recompute has_speech at the single convergence point. It is first set in
+    # align_transcript_with_segments (transcribe.py), but the subdivision passes
+    # (scene_detect.py) create NEW sub-segments that do not carry it, so they
+    # would otherwise default to False. Derive it from the final transcript here
+    # so speech/non-speech routing (vision analysis, word-timeline, B-roll merge)
+    # is correct for every segment.
+    for seg in segments:
+        seg.has_speech = len((seg.transcript or "").split()) >= 3
+
     doc = EGTDocument(
         segments=segments,
         total_duration_sec=total_duration,

@@ -10,6 +10,66 @@ logger = logging.getLogger("VlogForge.Transcribe")
 _whisper_model = None
 _whisper_model_lock = threading.Lock()  # Guard for concurrent lazy initialization
 
+_align_model = None          # (model, metadata) singleton for WhisperX alignment
+_align_lock = threading.Lock()
+
+
+def _get_align_model():
+    """Lazily load the WhisperX wav2vec2 alignment model (English, CPU)."""
+    global _align_model
+    if _align_model is not None:
+        return _align_model
+    with _align_lock:
+        if _align_model is not None:
+            return _align_model
+        import whisperx  # may raise ImportError -> caller falls back
+        model_a, metadata = whisperx.load_align_model(language_code="en", device="cpu")
+        _align_model = (model_a, metadata)
+        logger.info("WhisperX alignment model loaded (en, cpu).")
+        return _align_model
+
+
+def _forced_align(audio_path: str, segments: List[Dict]) -> Optional[List[Dict]]:
+    """Refine word timings with WhisperX forced alignment.
+
+    Takes SENTENCE-LEVEL segments [{start,end,text}] from Whisper and aligns each
+    within its own time window, returning a flat word list [{start,end,text}]
+    with accurate bounds. Aligning per-segment (not one blob over the whole
+    audio) keeps boundaries tight in dense/stutter regions — a single giant
+    segment smears word ends by ~1s. Returns None (caller keeps raw words) if
+    whisperx is unavailable or anything fails — fail-loud, never silent.
+    """
+    try:
+        import whisperx
+    except Exception as e:
+        logger.warning(f"[FORCED-ALIGN] whisperx unavailable ({e}); keeping raw Whisper times.")
+        return None
+    try:
+        segs = [s for s in segments if s.get("text", "").strip()]
+        if not segs:
+            return None
+        model_a, metadata = _get_align_model()
+        audio = whisperx.load_audio(audio_path)
+        aligned = whisperx.align(
+            segs, model_a, metadata, audio, device="cpu", return_char_alignments=False,
+        )
+        out = []
+        for seg in aligned.get("segments", []):
+            for w in seg.get("words", []):
+                if w.get("start") is None or w.get("end") is None:
+                    continue
+                out.append({"start": float(w["start"]), "end": float(w["end"]),
+                            "text": str(w.get("word", "")).strip()})
+        if not out:
+            logger.warning("[FORCED-ALIGN] produced no words; keeping raw Whisper times.")
+            return None
+        logger.info(f"[FORCED-ALIGN] refined {len(out)} word timings via WhisperX "
+                    f"({len(segs)} segments).")
+        return out
+    except Exception as e:
+        logger.error(f"[FORCED-ALIGN] failed ({e}); keeping raw Whisper times.")
+        return None
+
 
 def get_whisper_model():
     """Load Whisper model lazily to save startup memory. Uses GPU (CUDA) by default with fallback to CPU.
@@ -113,7 +173,14 @@ def transcribe_audio(audio_path: str, status_callback=None) -> List[Dict]:
                 word_timestamps=True
             )
             transcription_results = []
+            whisper_segments = []   # sentence-level, for forced alignment windows
             for segment in segments:
+                if segment.text and segment.text.strip():
+                    whisper_segments.append({
+                        "start": segment.start,
+                        "end": segment.end,
+                        "text": segment.text.strip(),
+                    })
                 if segment.words:
                     for word in segment.words:
                         transcription_results.append({
@@ -127,9 +194,19 @@ def transcribe_audio(audio_path: str, status_callback=None) -> List[Dict]:
                         "end": segment.end,
                         "text": segment.text.strip()
                     })
-            
+
             logger.info(f"Whisper STT completed with {len(transcription_results)} segments/words.")
-            
+
+            # Forced-alignment refinement (WhisperX / wav2vec2). Whisper's own
+            # word timestamps are coarse (words mis-bucketed by ~1.5s, stretched
+            # tokens), which breaks clean-cut boundaries downstream. Replace them
+            # with forced-aligned times when available. Fail-loud fallback keeps
+            # the raw Whisper words on any error or if whisperx is absent.
+            if getattr(settings, "enable_forced_alignment", False) and whisper_segments:
+                refined = _forced_align(audio_path, whisper_segments)
+                if refined is not None:
+                    transcription_results = refined
+
             if getattr(settings, "enable_mock_whisper", False):
                 try:
                     os.makedirs(settings.mock_llm_dir, exist_ok=True)
