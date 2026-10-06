@@ -43,6 +43,8 @@ from app.tasks.retake_detect import detect_and_resolve_retakes
 from app.tasks.word_timeline_redundancy import apply_word_timeline_selection, clamp_edl_to_word_timeline
 from app.tasks.edl import generate_edl
 from app.tasks.assemble import assemble_vlog
+from app.tasks.compiler import compile_and_render
+from app.tasks.speech_cleanup import REVIEW, cleanup_plan, label_grid, label_ranges
 from app.tasks.metadata import generate_metadata
 from app.utils.interaction_logger import interaction_logger
 from app.utils.word_snap import snap_edl_to_word_boundaries
@@ -148,6 +150,8 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
     """Synchronous pipeline run (to be run in a separate thread)."""
     from app.utils.llm import current_job_id
     current_job_id.set(job_id)
+    if settings.enable_word_grid_compiler and not settings.enable_word_grid:
+        raise RuntimeError("enable_word_grid_compiler requires enable_word_grid (the cleanup edits the word grid)")
 
     # Lock to serialize WebSocket broadcasts from concurrent worker threads
     broadcast_lock = threading.Lock()
@@ -414,7 +418,8 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
         # JEV-judged clean takes (one per distinct line), keeping non-speech /
         # B-roll for the legacy path. Downstream EDL/word-snap/assembly consume
         # the synthetic clip_ids unchanged.
-        if settings.enable_word_timeline_redundancy:
+        # Skipped when the word-grid compiler makes the edit: its result would be unused.
+        if settings.enable_word_timeline_redundancy and not settings.enable_word_grid_compiler:
             check_cancelled()
             safe_broadcast("classifying", 66, "Selecting clean takes from the word timeline...")
             egt_doc, wt_warnings = apply_word_timeline_selection(egt_doc)
@@ -432,64 +437,101 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
             jobs_data_db[job_id]["word_grid"] = word_grid.model_dump()
 
         # ==================================================================
-        # PASS 2 — REASONING (stub in Phase 0: mechanical filter only)
+        # Archdoc Phase 4 path (flag-gated): grid cleanup -> compiler -> render.
+        # Replaces EDL + assembly; the earlier stages still run for metadata/storage.
         # ==================================================================
+        if settings.enable_word_grid_compiler:
+            check_cancelled()
+            safe_broadcast("edl_generating", 70, "Cleaning up speech on the word grid (retakes, dead air)...")
+            if word_grid is None or not {w.source_file for w in word_grid.words} <= set(envs):
+                raise RuntimeError("word-grid compiler: word grid or analysis audio missing; cannot compile")
+            final_video_name = f"{job_id}.mp4"
+            final_video_path = os.path.join(settings.output_dir, final_video_name)
+            file_map = {f["filename"]: f.get("original_path") or f.get("cfr_path") for f in files_info}
+            labels = label_grid(word_grid)
+            plan = cleanup_plan(word_grid, labels)
+            safe_broadcast("assembling", 85, "Compiling and rendering the edit...")
+            timeline, render_info = compile_and_render(plan, word_grid, envs, file_map, final_video_path)
+            ranges = label_ranges(word_grid, labels)
+            review = [r for r in ranges if r["label"] == REVIEW]
+            job_warnings = [
+                "Word-grid edit: speech only; B-roll and target duration "
+                f"({target_duration}s) are not applied yet (output {timeline.duration_sec:.1f}s).",
+            ]
+            job_warnings += [f"Review take at {r['start']:.1f}-{r['end']:.1f}s ({len(r['by']['alternatives'])} other "
+                             f"clean take(s)): \"{r['text'][:60]}\"" for r in review]
+            if render_info["validation"]["status"] != "pass":
+                job_warnings.append(f"Validation {render_info['validation']['status']}: " + ", ".join(
+                    f"{c['check']} (segment {c['segment']})" for c in render_info["validation"]["checks"]
+                    if c["status"] != "pass"))
+            if job_id in jobs_db:
+                jobs_db[job_id].warnings.extend(job_warnings)
+            for w in job_warnings:
+                logger.warning(f"[WORD-GRID-COMPILER] {w}")
+            # EDL-shaped view of the timeline for metadata / storage consumers
+            edl = [{"clip_id": "", "source_file": s.source_file, "start_sec": s.src_in, "end_sec": s.src_out,
+                    "editorial_type": "KEEP", "sequence_index": k} for k, s in enumerate(timeline.segments)]
+            jobs_data_db[job_id].update({"edl": edl, "reasoning_mode": "word_grid_compiler",
+                                         "cleanup": ranges, "timeline": timeline.model_dump(),
+                                         "validation": render_info["validation"]})
+        else:
+            # ---- Legacy path: EDL reasoning + assembly ----
 
-        # ---- Stage 6: EDL Generation ----
-        check_cancelled()
-        total_segs_for_edl = len(egt_doc.segments)
-        using_map_reduce = total_segs_for_edl > settings.edl_chunk_threshold
-        edl_stage_msg = (
-            f"Generating Edit Decision List (Map-Reduce: {total_segs_for_edl} segments, "
-            f"{max(1, (total_segs_for_edl + settings.edl_chunk_size - 1) // settings.edl_chunk_size)} chunks)..."
-            if using_map_reduce
-            else "Generating Edit Decision List (AI Reasoning)..."
-        )
-        safe_broadcast("edl_generating", 65, edl_stage_msg)
+            # ---- Stage 6: EDL Generation ----
+            check_cancelled()
+            total_segs_for_edl = len(egt_doc.segments)
+            using_map_reduce = total_segs_for_edl > settings.edl_chunk_threshold
+            edl_stage_msg = (
+                f"Generating Edit Decision List (Map-Reduce: {total_segs_for_edl} segments, "
+                f"{max(1, (total_segs_for_edl + settings.edl_chunk_size - 1) // settings.edl_chunk_size)} chunks)..."
+                if using_map_reduce
+                else "Generating Edit Decision List (AI Reasoning)..."
+            )
+            safe_broadcast("edl_generating", 65, edl_stage_msg)
 
-        edl, _warning, reasoning_mode = generate_edl(egt_doc, full_transcript_segments, target_duration, context_text)
+            edl, _warning, reasoning_mode = generate_edl(egt_doc, full_transcript_segments, target_duration, context_text)
 
-        # ---- Stage 6.5: Word-boundary snap post-pass ----
-        check_cancelled()
-        safe_broadcast("edl_generating", 75, "Snapping cut points to word boundaries...")
-        segments_by_clip_id = {
-            seg.clip_id: seg.model_dump() for seg in all_segments
-        }
-        edl = snap_edl_to_word_boundaries(edl, segments_by_clip_id)
+            # ---- Stage 6.5: Word-boundary snap post-pass ----
+            check_cancelled()
+            safe_broadcast("edl_generating", 75, "Snapping cut points to word boundaries...")
+            segments_by_clip_id = {
+                seg.clip_id: seg.model_dump() for seg in all_segments
+            }
+            edl = snap_edl_to_word_boundaries(edl, segments_by_clip_id)
 
-        # When word-timeline selection is on, its spans ARE the cut decision.
-        # Restore their exact bounds so the LLM reasoner / word-snap cannot move
-        # the cut points (which otherwise slices into real speech mid-sentence).
-        if settings.enable_word_timeline_redundancy:
-            clamped = clamp_edl_to_word_timeline(edl, egt_doc)
-            logger.info(f"Word-timeline: clamped {clamped} EDL entries to clean span bounds")
+            # When word-timeline selection is on, its spans ARE the cut decision.
+            # Restore their exact bounds so the LLM reasoner / word-snap cannot move
+            # the cut points (which otherwise slices into real speech mid-sentence).
+            if settings.enable_word_timeline_redundancy:
+                clamped = clamp_edl_to_word_timeline(edl, egt_doc)
+                logger.info(f"Word-timeline: clamped {clamped} EDL entries to clean span bounds")
 
-        jobs_data_db[job_id]["edl"] = edl
-        jobs_data_db[job_id]["reasoning_mode"] = reasoning_mode
+            jobs_data_db[job_id]["edl"] = edl
+            jobs_data_db[job_id]["reasoning_mode"] = reasoning_mode
 
-        # Build set of valid clip_ids for assembly validation (exclude bad/superseded/stutter)
-        egt_clip_ids = {
-            seg.clip_id for seg in all_segments
-            if not seg.is_bad_take and not getattr(seg, "is_superseded_take", False) and not getattr(seg, "is_stutter_repeat", False)
-        }
+            # Build set of valid clip_ids for assembly validation (exclude bad/superseded/stutter)
+            egt_clip_ids = {
+                seg.clip_id for seg in all_segments
+                if not seg.is_bad_take and not getattr(seg, "is_superseded_take", False) and not getattr(seg, "is_stutter_repeat", False)
+            }
 
-        # ==================================================================
-        # PASS 3 — MECHANICAL ASSEMBLY
-        # ==================================================================
+            # ==================================================================
+            # PASS 3 — MECHANICAL ASSEMBLY
+            # ==================================================================
 
-        # ---- Stage 7: Video Assembly (FFmpeg) ----
-        check_cancelled()
-        safe_broadcast("assembling", 85, "Assembling video cuts with FFmpeg...")
+            # ---- Stage 7: Video Assembly (FFmpeg) ----
+            check_cancelled()
+            safe_broadcast("assembling", 85, "Assembling video cuts with FFmpeg...")
 
-        final_video_name = f"{job_id}.mp4"
-        final_video_path = os.path.join(settings.output_dir, final_video_name)
+            final_video_name = f"{job_id}.mp4"
+            final_video_path = os.path.join(settings.output_dir, final_video_name)
 
-        assembly_success = assemble_vlog(
-            edl, files_info, job_dir, final_video_path,
-            egt_clip_ids=egt_clip_ids
-        )
-        if not assembly_success:
-            raise RuntimeError("FFmpeg assembly pipeline failed.")
+            assembly_success = assemble_vlog(
+                edl, files_info, job_dir, final_video_path,
+                egt_clip_ids=egt_clip_ids
+            )
+            if not assembly_success:
+                raise RuntimeError("FFmpeg assembly pipeline failed.")
 
         # Clean up CFR temp files after successful assembly to save disk space
         cfr_dir = os.path.join(job_dir, "cfr")

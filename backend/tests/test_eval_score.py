@@ -109,3 +109,35 @@ def test_optional_never_penalised_and_imperfect_drop_counted():
     mask = np.ones(1000, bool)
     s2 = score_timeline(g, [Range("a", 5.0, 6.0)], {"a": (mask, 0.01)})["summary"]
     assert s2["unlabelled_speech_in_output_sec"] == pytest.approx(0.0)   # optional counts as labelled
+
+
+def _masks(speech_ivs, loud_ivs=(), dur=30.0, hop=0.01):
+    sp, act = np.zeros(int(dur / hop), bool), np.zeros(int(dur / hop), bool)
+    for a, b in speech_ivs:
+        sp[int(a / hop): int(b / hop)] = True
+    act |= sp
+    for a, b in loud_ivs:
+        act[int(a / hop): int(b / hop)] = True
+    return {"a": (sp, hop, act)}
+
+
+def test_removed_silence_inside_a_keep_is_not_clipping():
+    m = _masks([(10.0, 10.8), (11.2, 12.0), (20.0, 23.0)])            # 10.8-11.2 is silent
+    res = score_timeline(GOLD, [Range("a", 10.0, 10.8), Range("a", 11.2, 12.0), Range("a", 20.0, 23.0)], m)
+    k = _keep(res, "k1")
+    assert k["status"] == "complete" and k["interior_gap_sec"] == pytest.approx(0.4) and k["interior_gap_active_sec"] == 0
+
+
+def test_removed_speech_inside_a_keep_is_clipping_even_if_vad_missed_it():
+    m = _masks([(10.0, 10.8), (11.2, 12.0)], loud_ivs=[(10.8, 11.2)])  # VAD missed it, loudness did not
+    res = score_timeline(GOLD, [Range("a", 10.0, 10.8), Range("a", 11.2, 12.0)], m)
+    assert _keep(res, "k1")["status"] == "clipped"
+
+
+def test_short_exclude_overlap_carrying_speech_is_a_leak():
+    m = _masks([(8.0, 9.0), (10.0, 12.0)])
+    res = score_timeline(GOLD, [Range("a", 8.92, 12.0)], m)           # 0.08 s < LEAK_TOL, but it is speech
+    x = res["exclude"][0]
+    assert x["leaked_sec"] == pytest.approx(0.08) and x["leaked"]
+    quiet = score_timeline(GOLD, [Range("a", 8.92, 12.0)], _masks([(10.0, 12.0)]))
+    assert not quiet["exclude"][0]["leaked"]                          # same overlap, silent: not a leak
