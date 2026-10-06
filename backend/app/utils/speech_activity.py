@@ -6,7 +6,7 @@ Timings come from the audio alone, never from ASR output.
 Speech detection (method):
   vad     (default) Silero voice-activity detection (bundled with faster-whisper).
           Distinguishes speech from loud non-speech (cooking, traffic, music), but
-          misses elongated / sung speech (chai clip 'Byeee': p <= 0.43).
+          misses elongated / sung speech (a drawn-out sign-off on an eval clip: p <= 0.43).
   energy  per-file loudness threshold. Only reliable in quiet rooms: on a noisy
           kitchen clip it agreed with VAD on 69% of frames (96.6% on IMG_1614).
 `Envelope.loud` (the energy mask) is always computed, so callers can flag speech
