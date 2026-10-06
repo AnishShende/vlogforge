@@ -174,6 +174,33 @@ def get_whisper_model():
 
 
 def transcribe_audio(audio_path: str, status_callback=None) -> List[Dict]:
+    """Transcribe an audio file (see _transcribe_audio). Outside mock mode, the result is reused
+    from the artifact store when the same audio CONTENT was transcribed with the same settings
+    (roadmap Phase 5); mock mode keeps its own replay cache (eval baselines)."""
+    from app.config import settings
+    from app.utils import artifacts
+    if getattr(settings, "enable_mock_whisper", False) or not artifacts.enabled() \
+            or not audio_path or not os.path.exists(audio_path):
+        return _transcribe_audio(audio_path, status_callback)
+    key = artifacts.make_key("transcribe", artifacts.file_digest(audio_path), TRANSCRIBE_VERSION,
+                             bool(getattr(settings, "enable_word_grid", False)),
+                             bool(getattr(settings, "enable_forced_alignment", True)))
+    cached = artifacts.get("transcribe", key)
+    if cached is not None:
+        if status_callback:
+            status_callback("using stored transcript")
+        return cached
+    result = _transcribe_audio(audio_path, status_callback)
+    if result:                                   # never store an empty / failed transcription
+        artifacts.put("transcribe", key, result)
+    return result
+
+
+# Bump when transcription output changes for the same audio + settings (model, decoding, recovery).
+TRANSCRIBE_VERSION = "faster-whisper-turbo|whisperx-wav2vec2-en|grid-v3|2026-10-06"
+
+
+def _transcribe_audio(audio_path: str, status_callback=None) -> List[Dict]:
     """Transcribe an audio file and return segment dictionaries with start, end, text.
     Uses Gemini 2.5 Flash Speech-to-Text with local Whisper fallback.
     """

@@ -45,6 +45,8 @@ from app.tasks.edl import generate_edl
 from app.tasks.assemble import assemble_vlog
 from app.tasks.compiler import compile_and_render
 from app.tasks.speech_cleanup import REVIEW, cleanup_plan, label_grid, label_ranges
+from app.tasks.recompile import recompile_job, save_job_edit
+from app.models import EditPlan
 from app.tasks.metadata import generate_metadata
 from app.utils.interaction_logger import interaction_logger
 from app.utils.word_snap import snap_edl_to_word_boundaries
@@ -474,6 +476,10 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
             jobs_data_db[job_id].update({"edl": edl, "reasoning_mode": "word_grid_compiler",
                                          "cleanup": ranges, "timeline": timeline.model_dump(),
                                          "validation": render_info["validation"]})
+            # Phase 5: persist what a later re-compile needs (survives a restart)
+            save_job_edit(job_id, word_grid, [{"filename": f["filename"], "path": file_map[f["filename"]],
+                                               "audio_path": f["audio_path"]} for f in files_info],
+                          plan, timeline, render_info, cleanup_ranges=ranges)
         else:
             # ---- Legacy path: EDL reasoning + assembly ----
 
@@ -700,3 +706,29 @@ async def start_re_reasoning(job_id: str, quality_threshold: float):
         asyncio.to_thread(run_re_reasoning_sync, job_id, quality_threshold, main_loop)
     )
 
+
+
+def run_recompile_sync(job_id: str, plan: Dict, main_loop: asyncio.AbstractEventLoop = None):
+    """Phase 5 re-compile only: stored grid + edited plan -> compile -> render (no ingest/ASR/cleanup)."""
+    def broadcast(stage, progress, message, download_url=None):
+        if main_loop:
+            asyncio.run_coroutine_threadsafe(
+                broadcast_progress(job_id, stage, progress, message, download_url), main_loop).result()
+    try:
+        broadcast("assembling", 85, "Re-compiling the edit...")
+        final_video_path = os.path.join(settings.output_dir, f"{job_id}.mp4")
+        timeline, info = recompile_job(job_id, EditPlan.model_validate(plan), final_video_path)
+        if job_id in jobs_data_db:
+            jobs_data_db[job_id].update({"timeline": timeline.model_dump(), "validation": info["validation"]})
+        if job_id in jobs_db and info["validation"]["status"] != "pass":
+            jobs_db[job_id].warnings.append(f"Re-compile validation {info['validation']['status']}")
+        broadcast("complete", 100, "Edit re-compiled.", download_url=f"/api/jobs/{job_id}/download")
+    except Exception as e:
+        logger.error(f"Re-compile failed for job {job_id}: {e}", exc_info=True)
+        broadcast("failed", 0, f"Re-compile error: {e}")
+
+
+async def start_recompile(job_id: str, plan: Dict):
+    """Spawn the re-compile in a background worker thread."""
+    main_loop = asyncio.get_running_loop()
+    asyncio.create_task(asyncio.to_thread(run_recompile_sync, job_id, plan, main_loop))
