@@ -25,8 +25,8 @@ class TestRepeatedNgrams:
         assert count_repeated_ngrams(words) == 0
 
     def test_bigram_restart(self):
-        # "because the because the deepest"
-        words = ["because", "the", "because", "the", "deepest"]
+        # "and then and then market"
+        words = ["and", "then", "and", "then", "market"]
         assert count_repeated_ngrams(words) >= 1
 
     def test_trigram_restart(self):
@@ -87,17 +87,17 @@ class TestDisfluencyScore:
         assert result["word_count"] == 4
 
     def test_disfluent_segment(self):
-        # "because the uh because the deepest"
+        # "and then uh and then market"
         timings = [
-            {"word": "because", "start": 0.0, "end": 0.4},
-            {"word": "the", "start": 0.5, "end": 0.6},
+            {"word": "and", "start": 0.0, "end": 0.4},
+            {"word": "then", "start": 0.5, "end": 0.6},
             {"word": "uh", "start": 0.7, "end": 0.9},
-            {"word": "because", "start": 1.0, "end": 1.4},
-            {"word": "the", "start": 1.5, "end": 1.6},
-            {"word": "deepest", "start": 1.7, "end": 2.1},
+            {"word": "and", "start": 1.0, "end": 1.4},
+            {"word": "then", "start": 1.5, "end": 1.6},
+            {"word": "market", "start": 1.7, "end": 2.1},
         ]
         result = compute_disfluency_score(timings)
-        assert result["restart_count"] >= 1  # "because the" repeated
+        assert result["restart_count"] >= 1  # "and then" repeated
         assert result["hesitation_ratio"] > 0  # "uh" is a filler
         assert result["disfluency_score"] > 0
 

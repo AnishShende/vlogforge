@@ -3,7 +3,7 @@
 Scans word_timings within a segment or utterance to detect delivery
 problems that indicate a bad or unclean take:
 
-    1. Repeated n-grams: "because the because the deepest..."
+    1. Repeated n-grams: "and then the and then the market..."
     2. Hesitation density: ratio of filler words (uh, um, er, like)
     3. Abnormal mid-phrase pauses: long gaps between words within a sentence
 
@@ -44,7 +44,7 @@ def count_repeated_ngrams(
     words of the original occurrence.  Each repeated instance counts once.
 
     Example:
-        "because the because the deepest" → 1 repeated bigram
+        "and then the and then the market" → 1 repeated bigram
         "so today so today we are so today" → 2 repeated bigrams
 
     Args:
