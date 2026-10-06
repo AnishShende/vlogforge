@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     upload_dir: str = "d:/VlogForge/uploads"
     output_dir: str = "d:/VlogForge/outputs"
+    artifact_dir: str = "d:/VlogForge/artifacts"   # Phase 5 stage results (transcripts, JEV scores, job edits)
+    enable_artifact_cache: bool = True             # reuse transcription / JEV results by content (non-mock runs)
     log_dir: str = "d:/VlogForge/logs"
 
     # M0 Auth settings
@@ -94,6 +96,7 @@ class Settings(BaseSettings):
                 self.output_dir = os.path.join(workspace_root, "outputs")
                 self.log_dir = os.path.join(workspace_root, "logs")
                 self.mock_llm_dir = os.path.join(workspace_root, "mocks")
+                self.artifact_dir = os.path.join(workspace_root, "artifacts")
 
         if self.typesafe_api_key:
             os.environ["TYPESAFE_API_KEY"] = self.typesafe_api_key

@@ -14,7 +14,7 @@ import asyncio
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from app.models import JobStatus, VideoFileInfo, EDLEntry
+from app.models import JobStatus, VideoFileInfo, EDLEntry, EditPlan
 from app.db_models import VideoFile, Project
 from app.database import get_db
 from app.tasks.orchestrator import (
@@ -27,7 +27,8 @@ from app.tasks.orchestrator import (
     start_pipeline,
     broadcast_progress,
     cancel_job,
-    start_re_reasoning
+    start_re_reasoning,
+    start_recompile,
 )
 from app.tasks.assemble import assemble_vlog
 from app.utils.interaction_logger import interaction_logger
@@ -371,6 +372,17 @@ async def re_reason_job_endpoint(job_id: str, request: ReReasonRequest):
     await start_re_reasoning(job_id, request.quality_threshold)
 
     return {"status": "re-reasoning", "message": "Re-reasoning job started."}
+
+@app.post("/api/jobs/{job_id}/recompile")
+async def recompile_job_endpoint(job_id: str, plan: EditPlan):
+    """Re-compile a word-grid job with an edited plan (word ranges). Re-runs compile + render
+    only: no ingest, transcription or cleanup. Works after a restart (stored artifacts)."""
+    from app.tasks.recompile import can_recompile
+    if not can_recompile(job_id):
+        raise HTTPException(status_code=404, detail="No stored word-grid edit for this job")
+    interaction_logger.log_interaction("recompile_job", {"job_id": job_id, "segments": len(plan.segments)})
+    await start_recompile(job_id, plan.model_dump())
+    return {"status": "recompiling", "message": "Re-compile started."}
 
 @app.websocket("/ws/{job_id}")
 async def websocket_progress_endpoint(websocket: WebSocket, job_id: str):

@@ -48,3 +48,6 @@ eval-set/
 Archdoc.txt
 
 docs/
+
+# Phase 5 artifact store (stage results; may hold transcripts of user footage)
+artifacts/

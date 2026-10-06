@@ -396,6 +396,10 @@ def _clean_take_question():
     return _CLEAN_TAKE_QUESTION
 
 
+# Bump when the clean-take question / scale changes (stored scores become stale).
+JEV_CLEAN_TAKE_VERSION = "fluent_complete|0-4|v1"
+
+
 def score_clean_take_candidate(text: str) -> Optional[Tuple[float, float]]:
     """Score one candidate transcript for completeness + fluency via JEV.
 
@@ -422,6 +426,14 @@ def score_clean_take_candidate(text: str) -> Optional[Tuple[float, float]]:
         else:
             logger.info(f"[REAL JEV] Cache miss for {text[:40]!r} — calling TypeSafe")
 
+    from app.utils import artifacts
+    art_key = None
+    if cache_file is None and artifacts.enabled():          # Phase 5: reuse scores outside mock mode
+        art_key = artifacts.make_key("jev_clean_take", JEV_CLEAN_TAKE_VERSION, text.strip().lower())
+        hit = artifacts.get("jev", art_key)
+        if hit is not None:
+            return float(hit["score"]), float(hit["confidence"])
+
     try:
         r = client.system_one(state={"candidate": {"transcript": text}},
                               questions=_clean_take_question())
@@ -438,6 +450,9 @@ def score_clean_take_candidate(text: str) -> Optional[Tuple[float, float]]:
                 json.dump({"score": result[0], "confidence": result[1], "text": text}, f)
         except Exception as e:
             logger.warning(f"Failed to write JEV cache {cache_file}: {e}")
+
+    if art_key is not None:
+        artifacts.put("jev", art_key, {"score": result[0], "confidence": result[1]})
 
     return result
 
