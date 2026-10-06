@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     enable_word_grid: bool = False         # Archdoc Phase 1: build the word grid; transcripts keep
                                            # conf, interpolated + recovered words, temperature 0 (whisper cache v3)
                                            # (wav2vec2); no-op if whisperx missing
+    enable_word_grid_compiler: bool = False  # Archdoc Phase 4: the edit = word-grid speech cleanup -> compiler
+                                             # -> single-pass render, replacing EDL + assembly. Requires
+                                             # enable_word_grid. Speech only: B-roll and target duration are
+                                             # ignored (job warnings say so).
 
     model_config = SettingsConfigDict(
         env_file=os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".env"),

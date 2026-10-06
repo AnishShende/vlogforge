@@ -490,3 +490,105 @@ def assemble_single_pass(edl, file_map, output_path, crossfade_duration=0.075):
             "Caller should fall back to multi-pass assembly."
         )
         return False
+
+
+# ---------------------------------------------------------------------------
+# Compiled-timeline render (Archdoc roadmap Phase 2 / S4). Used by the word-grid
+# compiler only; the legacy EDL path above is unchanged.
+# ---------------------------------------------------------------------------
+
+RENDER_SR = 48000
+_RENDER_SCALE = ("scale=1920:1080:force_original_aspect_ratio=decrease,"
+                 "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1")
+_LOUDNORM = "loudnorm=I=-14:TP=-1.5:LRA=11"
+
+
+def _compiled_inputs(segments: List[Dict], file_map: Dict[str, str]) -> List[str]:
+    """One accurately seeked input per segment (+0.5 s slack; exact length is set in-graph)."""
+    args = []
+    for s in segments:
+        src = file_map.get(s["source_file"])
+        if not src or not os.path.exists(src):
+            raise FileNotFoundError(f"source for {s['source_file']!r} not found at {src!r}")
+        args += ["-ss", f"{s['src_in']:.6f}", "-t", f"{s['src_out'] - s['src_in'] + 0.5:.6f}", "-i", src]
+    return args
+
+
+def _compiled_audio_graph(segments: List[Dict], fps: int, join_fade: float, head_fade: float,
+                          tail_fade: float, loudnorm: str) -> List[str]:
+    """Each segment: exactly round(frames * SR / fps) samples at 48 kHz stereo, short fades at
+    both ends; concat; global fades no longer than the first/last pause; one loudnorm pass."""
+    parts, total = [], 0.0
+    for i, s in enumerate(segments):
+        frames = round((s["src_out"] - s["src_in"]) * fps)
+        dur = frames / fps
+        total += dur
+        fade = min(join_fade, dur / 4)
+        parts.append(
+            f"[{i}:a]aresample={RENDER_SR},aformat=sample_fmts=fltp:channel_layouts=stereo,"
+            f"asetpts=PTS-STARTPTS,apad=pad_dur=0.5,atrim=end_sample={frames * RENDER_SR // fps},"
+            f"asetpts=PTS-STARTPTS,afade=t=in:d={fade:.4f},afade=t=out:st={dur - fade:.6f}:d={fade:.4f}[a{i}]")
+    ins = "".join(f"[a{i}]" for i in range(len(segments)))
+    chain = f"{ins}concat=n={len(segments)}:v=0:a=1"
+    if head_fade > 0:
+        chain += f",afade=t=in:d={head_fade:.4f}"
+    if tail_fade > 0:
+        chain += f",afade=t=out:st={total - tail_fade:.6f}:d={tail_fade:.4f}"
+    parts.append(f"{chain},{loudnorm},aresample={RENDER_SR}[aout]")
+    return parts
+
+
+def _measure_loudness(cmd_inputs: List[str], audio_graph: List[str]) -> Dict:
+    """Pass 1 of two-pass loudnorm over the whole compiled audio."""
+    cmd = [get_ffmpeg_path(), "-hide_banner", "-nostats", *cmd_inputs,
+           "-filter_complex", ";".join(audio_graph), "-map", "[aout]", "-f", "null", "-"]
+    err = subprocess.run(cmd, check=True, capture_output=True).stderr.decode()
+    return json.loads(err[err.rindex("{"): err.rindex("}") + 1])
+
+
+def render_compiled(segments: List[Dict], file_map: Dict[str, str], output_path: str, fps: int = 30,
+                    join_fade: float = 0.015, head_fade: float = 0.0, tail_fade: float = 0.0) -> Dict:
+    """Render compiled segments [{source_file, src_in, src_out}] in one pass.
+
+    Video and audio of every segment have the same exact length (whole frames; the compiler
+    snaps segment lengths), so A/V stays in sync across any number of cuts. Joins get short
+    non-overlapping audio fades; loudness is normalised once over the whole output (two-pass
+    loudnorm, linear gain), not per clip. Returns {"loudness": measured, "duration_sec": ...}.
+    Raises on failure (fail loud; no fallback path).
+    """
+    if not segments:
+        raise ValueError("render_compiled: no segments")
+    inputs = _compiled_inputs(segments, file_map)
+    measured = _measure_loudness(inputs, _compiled_audio_graph(
+        segments, fps, join_fade, head_fade, tail_fade, _LOUDNORM + ":print_format=json"))
+    norm = (f"{_LOUDNORM}:measured_I={measured['input_i']}:measured_TP={measured['input_tp']}"
+            f":measured_LRA={measured['input_lra']}:measured_thresh={measured['input_thresh']}"
+            f":offset={measured['target_offset']}:linear=true")
+    video = []
+    total = 0.0
+    for i, s in enumerate(segments):
+        frames = round((s["src_out"] - s["src_in"]) * fps)
+        total += frames / fps
+        video.append(f"[{i}:v]setpts=PTS-STARTPTS,fps={fps},{_RENDER_SCALE},tpad=stop_mode=clone:stop_duration=0.5,"
+                     f"trim=end_frame={frames},setpts=PTS-STARTPTS[v{i}]")
+    vins = "".join(f"[v{i}]" for i in range(len(segments)))
+    video.append(f"{vins}concat=n={len(segments)}:v=1:a=0,fade=in:st=0:d=0.5,"
+                 f"fade=out:st={max(0.0, total - 1.0):.6f}:d=1.0[vout]")
+    graph = video + _compiled_audio_graph(segments, fps, join_fade, head_fade, tail_fade, norm)
+    cmd = [get_ffmpeg_path(), "-y", *inputs, "-filter_complex", ";".join(graph),
+           "-map", "[vout]", "-map", "[aout]", "-r", str(fps), "-c:v", get_hw_encoder(), "-pix_fmt", "yuv420p",
+           "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", output_path]
+    logger.info(f"Compiled render: {len(segments)} segments -> {output_path} ({total:.2f}s), "
+                f"input loudness {measured['input_i']} LUFS")
+    run_ffmpeg_with_gpu_fallback(cmd)
+    return {"loudness": measured, "duration_sec": round(total, 6)}
+
+
+def media_durations(path: str) -> Dict[str, float]:
+    """{"video": container duration, "audio": DECODED samples / rate}. ffprobe's audio stream
+    duration rounds up to whole AAC packets plus priming (+33..67 ms not in the audio)."""
+    out = subprocess.run([get_ffprobe_path(), "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=duration",
+                          "-of", "json", path], check=True, capture_output=True).stdout
+    pcm = subprocess.run([get_ffmpeg_path(), "-v", "error", "-i", path, "-map", "0:a:0", "-ac", "1", "-ar", "16000",
+                          "-f", "s16le", "-"], check=True, capture_output=True).stdout
+    return {"video": float(json.loads(out)["streams"][0]["duration"]), "audio": len(pcm) / 2 / 16000}

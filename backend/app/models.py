@@ -185,6 +185,135 @@ class WordGrid(BaseModel):
     def by_id(self) -> Dict[str, Word]:
         return {w.id: w for w in self.words}
 
+    def fingerprint(self) -> str:
+        """Identity of the word sequence (ids + text, not times: edge refinement keeps a plan valid)."""
+        raw = "\n".join(f"{w.id}|{w.text}" for w in self.words)
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+# ---------------------------------------------------------------------------
+# Edit Plan — planner -> compiler contract (Archdoc Stage 10, roadmap Phase 2)
+# ---------------------------------------------------------------------------
+
+class EditSegment(BaseModel):
+    """An inclusive run of consecutive grid words from one file."""
+
+    word_start: str
+    word_end: str
+    reason: str = ""
+
+
+class EditPlan(BaseModel):
+    """Word ranges in output order. The compiler turns these into cuts; no times here."""
+
+    segments: List[EditSegment] = Field(default_factory=list)
+    grid_fingerprint: Optional[str] = None              # WordGrid.fingerprint() the plan was made on
+
+    def validate_against(self, grid: "WordGrid") -> List[str]:
+        """Check the plan against a grid. Returns a list of error messages (empty = OK)."""
+        errors = []
+        if not self.segments:
+            errors.append("Plan has no segments")
+        if self.grid_fingerprint and self.grid_fingerprint != grid.fingerprint():
+            errors.append(f"Plan made on grid {self.grid_fingerprint}, not this grid {grid.fingerprint()}")
+        index = {w.id: i for i, w in enumerate(grid.words)}
+        used: Dict[int, int] = {}
+        for n, seg in enumerate(self.segments):
+            missing = [wid for wid in (seg.word_start, seg.word_end) if wid not in index]
+            if missing:
+                errors.append(f"Segment {n}: unknown word id(s) {missing}")
+                continue
+            a, b = index[seg.word_start], index[seg.word_end]
+            if a > b:
+                errors.append(f"Segment {n}: word_start {seg.word_start} comes after word_end {seg.word_end}")
+                continue
+            if grid.words[a].source_file != grid.words[b].source_file:
+                errors.append(f"Segment {n}: spans files {grid.words[a].source_file!r} and {grid.words[b].source_file!r}")
+                continue
+            for i in range(a, b + 1):
+                if i in used:
+                    errors.append(f"Segment {n}: word {grid.words[i].id} already used by segment {used[i]}")
+                    break
+                used[i] = n
+        return errors
+
+
+# Cut flags. Set by the compiler; every flagged cut is listed in the compile report.
+CUT_FLAG_TIGHT = "tight"            # no pause between the words: cut at the quietest point between their edges
+CUT_FLAG_LONG_TAIL = "long_tail"    # activity ran past the word edge longer than the search limit
+CUT_FLAG_FRAME_OFF = "frame_off"    # segment length could not be snapped to whole frames inside the window
+CUT_FLAG_IN_NOISE = "in_noise"      # dead-air cut placed in background noise (no words in the gap)
+
+
+class CutPoint(BaseModel):
+    """Where one end of a compiled segment was cut, and why there."""
+
+    time: float                                         # source time of the cut
+    side: str                                           # "in" (before the first word) | "out" (after the last)
+    word_edge: float                                    # the kept word's start (in) / end (out)
+    activity_edge: float                                # where speech/loudness past the word edge stops
+    window: List[float]                                 # [lo, hi] the cut was chosen from
+    level_db: float                                     # level at the cut
+    flags: List[str] = Field(default_factory=list)
+
+
+class CompiledSegment(BaseModel):
+    """One source range of the output, with the plan words it carries."""
+
+    source_file: str
+    src_in: float
+    src_out: float
+    word_ids: List[str]
+    reasons: List[str] = Field(default_factory=list)    # reasons of the plan segments merged into this one
+    cut_in: CutPoint
+    cut_out: CutPoint
+    pause_shortened_before_sec: Optional[float] = None  # S3: original silence before this segment, if shortened
+
+
+class CompiledTimeline(BaseModel):
+    """The compiler's output: what the render executes. Times are source times."""
+
+    segments: List[CompiledSegment]
+    fps: int
+    join_fade_sec: float                                # audio fade in/out at every join (no overlap)
+    head_fade_sec: float                                # global audio fade-in, never past the first word's activity
+    tail_fade_sec: float                                # global audio fade-out, never before the last word's activity
+    duration_sec: float                                 # sum of whole-frame segment lengths
+    grid_fingerprint: str = ""
+    pause_targets: Optional[Dict[str, float]] = None    # S3 targets used (None = pause shortening off)
+
+
+# ---------------------------------------------------------------------------
+# Validation Report — compiled output checked against its plan (roadmap Phase 3)
+# ---------------------------------------------------------------------------
+
+CHECK_PASS, CHECK_WARN, CHECK_FAIL = "pass", "warn", "fail"
+
+
+class ValidationCheck(BaseModel):
+    """One finding. `segment` is the compiled segment index (output order), None = whole output."""
+
+    check: str                                          # e.g. "cut_inside_word", "render_fidelity"
+    status: str                                         # pass | warn | fail
+    segment: Optional[int] = None
+    detail: str = ""
+    evidence: Dict = Field(default_factory=dict)
+
+
+class ValidationReport(BaseModel):
+    """Post-condition checks on a compiled job; status = fail if any check failed,
+    else warn if any warned, else pass."""
+
+    status: str = CHECK_PASS
+    checks: List[ValidationCheck] = Field(default_factory=list)
+
+    def summarize(self) -> Dict:
+        bad = [c for c in self.checks if c.status != CHECK_PASS]
+        counts: Dict[str, int] = {}
+        for c in bad:
+            counts[f"{c.status}:{c.check}"] = counts.get(f"{c.status}:{c.check}", 0) + 1
+        return {"status": self.status, "checks": len(self.checks), "not_pass": counts}
+
 
 # ---------------------------------------------------------------------------
 # Edit Decision List (EDL) — Pass 2 Reasoning Output

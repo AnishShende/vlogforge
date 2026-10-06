@@ -38,6 +38,7 @@ class Envelope:
     peak_db: float
     method: str = "energy"
     loud: Optional[np.ndarray] = None   # bool per frame: above the per-file loudness threshold
+    db: Optional[np.ndarray] = None     # float per frame: RMS level in dB (cut placement)
 
     def t2i(self, t: float) -> int:
         return int(np.clip(round(t / HOP_SEC), 0, len(self.speech) - 1))
@@ -70,7 +71,7 @@ def envelope(audio: np.ndarray, method: str = "vad") -> Envelope:
     else:
         raise ValueError(f"unknown speech detection method {method!r}")
     return Envelope(speech=speech, threshold_db=float(thr), floor_db=float(floor), peak_db=float(peak),
-                    method=method, loud=db > thr)
+                    method=method, loud=db > thr, db=db)
 
 
 def _silent_run(env: Envelope, i: int, step: int) -> bool:

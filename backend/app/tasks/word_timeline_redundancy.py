@@ -42,6 +42,7 @@ MAX_CLEAN_WORD_GAP_SEC = 1.0   # consecutive words must be ~back-to-back; a bigg
                                # gap means stutter/dead-air between them, so the
                                # FFmpeg cut would play it. Required for the span's
                                # time bounds to match clean audio (handoff rule).
+RESTART_PAUSE_SEC = 0.3        # a pause, then the run's opening words again = a restart
 MAX_WORD_DURATION_SEC = 2.0    # a single token longer than this is a Whisper
                                # stretch artifact (dead air / stutter collapsed
                                # into one word); never include it in a clean run.
@@ -163,10 +164,18 @@ def _maximal_fluent_runs(chunk: List[WordTimelineEntry]) -> List[List[WordTimeli
             # stutter collapsed into one word) — stop before including it.
             if (chunk[e].end_sec - chunk[e].start_sec) > MAX_WORD_DURATION_SEC:
                 break
+            # A restart after a pause: the speaker says the run's first two words again
+            # (catches restarts that diverge before a full n-gram repeats).
+            if (e - s >= 2 and e + 1 < n and (chunk[e].start_sec - chunk[e - 1].end_sec) >= RESTART_PAUSE_SEC
+                    and nw[e] == nw[s] and nw[e + 1] == nw[s + 1]):
+                break
             if e - s >= NGRAM - 1:
                 g = tuple(nw[e - NGRAM + 1:e + 1])
                 if g in local:
-                    break          # would repeat inside this run -> stop before e
+                    # the repeat starts NGRAM-1 words back: end the run before the restart,
+                    # not mid-way into it (it used to keep e.g. "...every day so so every day" up to the 3rd word)
+                    e -= NGRAM - 1
+                    break
                 local.add(g)
             e += 1
         runs.append(chunk[s:e])
@@ -192,13 +201,13 @@ def _generate_candidates(timeline: List[WordTimelineEntry]) -> List[WordSpan]:
         if key not in by_end or len(run) > len(by_end[key][1]):
             by_end[key] = (chunk_id, run)
 
-    spans, seen_text = [], set()
+    # Exact-text duplicates: keep the LATEST delivery (a speaker repeats a line they were not
+    # happy with; the earlier-first rule dropped IMG_1614's final clean take k5).
+    latest = {}
     for chunk_id, run in sorted(by_end.values(), key=lambda cr: (cr[1][0].source_file, cr[1][0].start_sec)):
-        norm_text = " ".join(_norm(w.word) for w in run)
-        if norm_text not in seen_text:
-            seen_text.add(norm_text)
-            spans.append(WordSpan(words=list(run), chunk_id=chunk_id))
-    return spans
+        latest[" ".join(_norm(w.word) for w in run)] = (chunk_id, run)
+    return [WordSpan(words=list(run), chunk_id=chunk_id)
+            for chunk_id, run in sorted(latest.values(), key=lambda cr: (cr[1][0].source_file, cr[1][0].start_sec))]
 
 
 def _group_by_content(spans: List[WordSpan]) -> List[List[int]]:
