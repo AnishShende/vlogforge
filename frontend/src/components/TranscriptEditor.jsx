@@ -19,14 +19,27 @@ const keptFromPlan = (words, plan) => {
   return kept;
 };
 
-const planFromKept = (words, kept) => {
-  const segments = [];
-  words.forEach((w, i) => {
-    if (!kept.has(w.id)) return;
-    const prev = words[i - 1];
-    if (prev && kept.has(prev.id) && prev.source_file === w.source_file) segments[segments.length - 1].word_end = w.id;
-    else segments.push({ word_start: w.id, word_end: w.id, reason: 'review' });
+// Kept words -> plan, keeping the CURRENT plan's segment order (story order, Phase 9). A kept word
+// joins the segment holding its nearest earlier word of the same file (else the next one); runs of
+// grid-consecutive words become segments.
+const planFromKept = (words, kept, currentPlan) => {
+  const index = new Map(words.map((w, i) => [w.id, i]));
+  const group = new Array(words.length).fill(-1);
+  (currentPlan?.segments || []).forEach((s, g) => {
+    for (let i = index.get(s.word_start); i <= index.get(s.word_end); i++) group[i] = g;
   });
+  const owner = (i) => {
+    for (let j = i; j >= 0 && words[j].source_file === words[i].source_file; j--) if (group[j] >= 0) return group[j];
+    for (let j = i + 1; j < words.length && words[j].source_file === words[i].source_file; j++) if (group[j] >= 0) return group[j] - 0.5;
+    return 1e9 + index.get(words[i].id);              // no stored order: recording order at the end
+  };
+  const byGroup = new Map();
+  words.forEach((w, i) => { if (kept.has(w.id)) { const g = owner(i); byGroup.set(g, [...(byGroup.get(g) || []), i]); } });
+  const segments = [];
+  [...byGroup.keys()].sort((a, b) => a - b).forEach(g => byGroup.get(g).forEach((i, k, arr) => {
+    if (k && i === arr[k - 1] + 1) segments[segments.length - 1].word_end = words[i].id;
+    else segments.push({ word_start: words[i].id, word_end: words[i].id, reason: 'review' });
+  }));
   return { segments };
 };
 
@@ -121,8 +134,8 @@ export default function TranscriptEditor({ jobId, onReset }) {
     v.play(); setAuditioning(r.key);
   };
 
-  const recompile = () => {
-    const plan = planFromKept(words, kept);
+  const recompile = (override) => {
+    const plan = override || planFromKept(words, kept, view.plan);
     if (!plan.segments.length) { setError('Nothing kept: restore some words first.'); return; }
     setRecompiling(true); setError(null);
     let started = false;
@@ -219,7 +232,7 @@ export default function TranscriptEditor({ jobId, onReset }) {
             {words.length} words · {removedCount} removed · {changed ? `${changed} word(s) changed since last render` : 'no changes'}
           </div>
           <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-            <button className="btn btn-primary" disabled={!changed || recompiling} onClick={recompile}>
+            <button className="btn btn-primary" disabled={!changed || recompiling} onClick={() => recompile()}>
               {recompiling ? <><Loader2 size={16} className="spinner" /> Re-compiling…</> : <>Re-compile{changed ? ` (${changed})` : ''}</>}
             </button>
             <button className="btn" disabled={!changed || recompiling} onClick={() => setKept(new Set(baseKept))}>Discard changes</button>
@@ -227,6 +240,32 @@ export default function TranscriptEditor({ jobId, onReset }) {
           </div>
           {error && <div style={{ color: 'var(--danger)', fontSize: '0.8rem', marginTop: '0.75rem' }}>{error}</div>}
         </div>
+
+        {view.story && (() => {
+          const st = view.story, same = (p) => JSON.stringify(p.edit_plan.segments.map(x => [x.word_start, x.word_end]))
+            === JSON.stringify((view.plan?.segments || []).map(x => [x.word_start, x.word_end]));
+          const fn = new Map(st.moments.map(m => [m.id, m]));
+          const best = st.plans[0];
+          return (
+            <div style={panel}>
+              <div style={panelTitle}>STORY PLANS · full edit {st.full_sec?.toFixed(0)}s{st.target_sec ? ` · target ${st.target_sec.toFixed(0)}s` : ''}</div>
+              {st.target_sec && best.duration_sec > st.target_sec * 1.15 && (
+                <div style={{ ...muted, color: 'var(--warning)', marginBottom: '0.5rem' }}>
+                  Target not reachable without breaking the story: shortest valid cut is {best.duration_sec.toFixed(0)}s.</div>)}
+              {st.plans.map((p, k) => (
+                <div key={k} title={p.reasoning} style={{ borderTop: k ? '1px solid var(--card-border)' : 'none', padding: '0.5rem 0' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                    <b style={{ fontSize: '0.85rem' }}>{k === 0 ? '★ ' : ''}{p.strategy.replace('_', ' ')}</b>
+                    <span style={muted}>{p.duration_sec.toFixed(1)}s · {p.order.length}/{st.moments.length} moments</span>
+                    {same(p) ? <span style={{ ...muted, color: 'var(--success)' }}>in use</span>
+                      : <button className="btn" disabled={recompiling} onClick={() => recompile(p.edit_plan)}>Use this plan</button>}
+                  </div>
+                  <div style={{ ...muted, marginTop: '0.25rem' }}>
+                    {p.order.map(id => `${fn.get(id)?.function || id}`).join(' → ')}</div>
+                </div>))}
+              <div style={{ ...muted, marginTop: '0.25rem' }}>Hover a plan for the editor's reasoning.</div>
+            </div>);
+        })()}
       </div>
 
       <div style={{ ...panel, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
