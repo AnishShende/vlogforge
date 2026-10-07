@@ -3,6 +3,7 @@ import { Film, Sparkles, Sliders, Clock, Loader2, Home, LayoutDashboard, Setting
 import UploadPanel from './components/UploadPanel';
 import ProcessingMonitor from './components/ProcessingMonitor';
 import VideoPreview from './components/VideoPreview';
+import TranscriptEditor from './components/TranscriptEditor';
 import DownloadPanel from './components/DownloadPanel';
 import * as tus from 'tus-js-client';
 
@@ -101,6 +102,12 @@ export default function App() {
   const [contextText, setContextText] = useState('');
   const [jobId, setJobId] = useState(null);
   const [downloadUrl, setDownloadUrl] = useState(null);
+  // Phase 6: word-grid jobs (stored edit) open the transcript editor; others the legacy timeline
+  const [hasGridEdit, setHasGridEdit] = useState(null);
+  useEffect(() => {
+    if (step !== 3 || !jobId) { setHasGridEdit(null); return; }
+    fetch(`/api/jobs/${jobId}/edit`, { method: 'GET' }).then(r => setHasGridEdit(r.ok)).catch(() => setHasGridEdit(false));
+  }, [step, jobId]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [targetDuration, setTargetDuration] = useState(600);
   const [vlogGenre, setVlogGenre] = useState('default');
@@ -615,7 +622,10 @@ export default function App() {
       )}
 
       {/* ═══ STEP 3: PREVIEW / EXPORT ═══ */}
-      {step === 3 && (
+      {step === 3 && hasGridEdit && (
+        <TranscriptEditor jobId={jobId} onReset={resetProject} />
+      )}
+      {step === 3 && hasGridEdit === false && (
         <VideoPreview 
           jobId={jobId} 
           downloadUrl={downloadUrl} 
