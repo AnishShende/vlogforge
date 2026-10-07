@@ -5,6 +5,7 @@ runs compile + render + validation."""
 
 import logging
 import os
+import time
 from typing import Dict, List, Optional, Tuple
 
 from app.models import CompiledTimeline, EditPlan, WordGrid
@@ -17,7 +18,14 @@ logger = logging.getLogger("VlogForge.Recompile")
 
 def save_job_edit(job_id: str, grid: WordGrid, files: List[Dict], plan: EditPlan, timeline: CompiledTimeline,
                   info: Dict, cleanup_ranges=None) -> None:
-    """Everything a later re-compile needs. files: [{filename, path, audio_path}]."""
+    """Everything a later re-compile needs. files: [{filename, path, audio_path}]. A re-run of the
+    pipeline must not silently destroy the user's edit: an existing plan that differs from the new
+    one is archived as plan.prev-<time> first."""
+    old_plan = artifacts.load_job(job_id, "plan")
+    if old_plan is not None and old_plan != plan.model_dump():
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        artifacts.save_job(job_id, f"plan.prev-{stamp}", old_plan)
+        logger.warning(f"[RECOMPILE] job {job_id}: re-run replaces a different stored plan; archived as plan.prev-{stamp}")
     artifacts.save_job(job_id, "grid", grid.model_dump())
     artifacts.save_job(job_id, "files", files)
     artifacts.save_job(job_id, "plan", plan.model_dump())

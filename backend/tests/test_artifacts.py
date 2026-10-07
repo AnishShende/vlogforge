@@ -4,7 +4,7 @@ import pytest
 from app.config import settings
 from app.tasks import transcribe
 from app.tasks.recompile import can_recompile, load_job_edit, recompile_job
-from app.models import EditPlan
+from app.models import EditPlan, WordGrid
 from app.utils import artifacts
 
 
@@ -72,3 +72,16 @@ def test_edit_view_maps_kept_words_to_output_time():
     assert view["word_out"] == {"w0": 0.1, "w2": 0.7}          # 0.6 s first segment, then 0.1 s into the second
     assert view["ranges"][0]["reason"] == "retake" and view["files"] == ["a.mov"]
     assert load_job_edit("missing") is None
+
+
+def test_rerun_archives_a_different_stored_plan():
+    from app.models import CompiledTimeline, EditSegment
+    from app.tasks.recompile import save_job_edit
+    grid = WordGrid(words=[])
+    tl = CompiledTimeline(segments=[], fps=30, join_fade_sec=0, head_fade_sec=0, tail_fade_sec=0, duration_sec=0)
+    user = EditPlan(segments=[EditSegment(word_start="a", word_end="b")])
+    artifacts.save_job("j2", "plan", user.model_dump())
+    save_job_edit("j2", grid, [], EditPlan(segments=[EditSegment(word_start="a", word_end="c")]), tl, {"validation": None})
+    import os
+    archived = [f for f in os.listdir(os.path.join(settings.artifact_dir, "jobs", "j2")) if f.startswith("plan.prev-")]
+    assert len(archived) == 1 and artifacts.load_job("j2", archived[0][:-5]) == user.model_dump()
