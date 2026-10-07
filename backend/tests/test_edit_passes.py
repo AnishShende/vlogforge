@@ -78,3 +78,13 @@ def test_plan_and_ui_ranges_from_cuts():
     assert [(s.word_start, s.word_end) for s in plan.segments] == [(ids[2], ids[-1])] and not plan.validate_against(g)
     ranges = ep.cut_ranges(g, cuts)
     assert [(r["label"], r["review"]) for r in ranges] == [("remove", True), ("suggest", False)]
+
+
+def test_no_line_is_ever_kept_twice():
+    g = _grid(["so the bakery opens early on most weekday mornings", "then we walk to the river",
+               "the bakery opens early on most weekday mornings", "and that is the end"])
+    kept = {w.id for w in g.words}
+    cuts = ep.no_duplicate_lines(g, kept)
+    assert len(cuts) == 1 and cuts[0]["applied"] and cuts[0]["review"]
+    assert cuts[0]["text"].startswith("so the bakery")                   # the earlier copy goes (redo wins)
+    assert ep.no_duplicate_lines(g, kept) == []                          # nothing left to remove

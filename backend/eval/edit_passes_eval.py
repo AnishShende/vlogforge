@@ -86,6 +86,12 @@ def predict_edit_passes(job: str, grid: WordGrid, trace: Optional[List] = None) 
     from app.tasks.edit_passes import ORDER, run_pass
     kept = {w.id for w in grid.words}
     for name in ORDER:
+        if name == "inside_take":
+            from app.tasks.edit_passes import no_duplicate_lines
+            dup = no_duplicate_lines(grid, kept)
+            if trace is not None:
+                trace.append(("no_duplicates", set(kept), dup, {"pass": "no_duplicates", "model": "-", "calls": 0, "cached": 0,
+                              "input_tokens": 0, "output_tokens": 0, "cuts": len(dup), "rejected": 0}))
         cuts, st = run_pass(name, grid, kept)
         for c in cuts:
             if c["applied"]:
