@@ -30,11 +30,16 @@ const planFromKept = (words, kept) => {
   return { segments };
 };
 
+const short = (t, n = 70) => (t && t.length > n ? t.slice(0, n - 1) + '…' : t);
 const reasonText = (r) => {
   if (r.label === 'remove' && r.reason === 'retake') return `retake (kept take at ${r.by?.start?.toFixed(1)}s)`;
   if (r.label === 'review') return `review: ${r.by?.alternatives?.length || 0} other clean take(s)`;
-  return r.reason;
+  if (r.label === 'suggest') return `suggested · ${short(r.reason)}`;
+  if (r.label === 'remove' && r.review) return `⚑ check take · ${short(r.reason)}`;
+  return short(r.reason);
 };
+const chipColors = (r) => r.label === 'remove' && !r.review ? ['rgba(239,68,68,0.12)', 'var(--danger)']
+  : r.label === 'suggest' ? ['rgba(139,92,246,0.15)', '#c4b5fd'] : ['rgba(245,158,11,0.12)', 'var(--warning)'];
 
 const fmt = (s) => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, '0')}`;
 
@@ -145,7 +150,8 @@ export default function TranscriptEditor({ jobId, onReset }) {
   const removedCount = words.length - kept.size;
 
   // Paragraphs: break at a file change or a long pause; ranges start a new chip inline
-  const rangeAt = new Map(ranges.map(r => [r.from, r]));
+  const rangeAt = new Map();
+  ranges.forEach(r => rangeAt.set(r.from, [...(rangeAt.get(r.from) || []), r]));
   const out = [];
   words.forEach((w, i) => {
     const prev = words[i - 1];
@@ -153,15 +159,13 @@ export default function TranscriptEditor({ jobId, onReset }) {
     if (!prev || prev.source_file !== w.source_file) {
       out.push(<div key={`f${i}`} style={{ fontSize: '0.7rem', color: 'var(--text-muted)', letterSpacing: '0.05em', margin: '0.75rem 0 0.25rem' }}>{w.source_file}</div>);
     }
-    const r = rangeAt.get(i);
-    if (r && r.label !== 'keep') {
+    for (const r of (rangeAt.get(i) || []).filter(x => x.label !== 'keep')) {
       const rangeKept = words.slice(r.from, r.to + 1).every(x => kept.has(x.id));
+      const [bg, fg] = chipColors(r);
       out.push(
-        <span key={`c${i}`} style={{
+        <span key={`c${i}-${r.key}`} title={r.reason} style={{
           display: 'inline-flex', alignItems: 'center', gap: '0.25rem', margin: '0 0.25rem', padding: '0 0.4rem',
-          borderRadius: 'var(--radius-sm)', fontSize: '0.7rem', verticalAlign: 'middle',
-          background: r.label === 'remove' ? 'rgba(239,68,68,0.12)' : 'rgba(245,158,11,0.12)',
-          color: r.label === 'remove' ? 'var(--danger)' : 'var(--warning)',
+          borderRadius: 'var(--radius-sm)', fontSize: '0.7rem', verticalAlign: 'middle', background: bg, color: fg,
         }}>
           {reasonText(r)}
           <button title={rangeKept ? 'Remove this range' : 'Restore this range'} onClick={() => setRange(r.from, r.to, !rangeKept)} style={chipBtn}>
@@ -176,7 +180,7 @@ export default function TranscriptEditor({ jobId, onReset }) {
     const isKept = kept.has(w.id);
     const wasKept = baseKept.has(w.id);
     const inSel = selection && i >= selection[0] && i <= selection[1];
-    const inReview = ranges.some(x => x.label === 'review' && i >= x.from && i <= x.to);
+    const inReview = ranges.some(x => (x.label === 'review' || (x.label === 'remove' && x.review)) && i >= x.from && i <= x.to);
     out.push(
       <span key={w.id} onClick={(e) => onWordClick(e, i)} style={{
         cursor: 'pointer', padding: '0 1px', borderRadius: '3px',
@@ -235,7 +239,7 @@ export default function TranscriptEditor({ jobId, onReset }) {
             </span>
           )}
         </div>
-        <div style={{ ...muted, marginBottom: '0.75rem' }}>Click a word to jump to it · shift-click to select a run · chips restore/remove a cleanup range or play it from the source</div>
+        <div style={{ ...muted, marginBottom: '0.75rem' }}>Click a word to jump to it · shift-click to select a run · <span style={{ color: 'var(--danger)' }}>red</span> = cut, <span style={{ color: 'var(--warning)' }}>⚑ amber</span> = take choice to check, <span style={{ color: '#c4b5fd' }}>purple</span> = suggested cut (click ✂ to apply) · ▶ plays it from the source</div>
         <div style={{ overflowY: 'auto', lineHeight: 1.9, fontSize: '0.95rem', paddingRight: '0.5rem' }}>{out}</div>
       </div>
     </div>

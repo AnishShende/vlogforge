@@ -75,6 +75,7 @@ class Settings(BaseSettings):
                                            # conf, interpolated + recovered words, temperature 0 (whisper cache v3)
                                            # (wav2vec2); no-op if whisperx missing
     enable_word_grid_compiler: bool = False  # Archdoc Phase 4: the edit = word-grid speech cleanup -> compiler
+    enable_edit_passes: bool = False         # Phase 6.5: LLM edit passes replace the JEV cleanup (needs the compiler flag)
                                              # -> single-pass render, replacing EDL + assembly. Requires
                                              # enable_word_grid. Speech only: B-roll and target duration are
                                              # ignored (job warnings say so).

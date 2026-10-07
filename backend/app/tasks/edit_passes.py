@@ -33,7 +33,7 @@ from typing import Dict, List, Optional, Set, Tuple
 import anthropic
 
 from app.config import settings
-from app.models import WordGrid
+from app.models import EditPlan, EditSegment, WordGrid
 from app.utils import artifacts
 
 logger = logging.getLogger("VlogForge.EditPasses")
@@ -437,3 +437,42 @@ def run_passes(grid: WordGrid, kept: Optional[Set[str]] = None, passes: List[str
         cuts += acc
         stats.append({**st, "kept_after": len(kept)})
     return kept, cuts, stats
+
+
+def plan_from_kept(grid: WordGrid, kept: Set[str]) -> EditPlan:
+    """Consecutive kept words of one file -> one segment, in source order."""
+    segs: List[EditSegment] = []
+    W = grid.words
+    for i, w in enumerate(W):
+        if w.id not in kept:
+            continue
+        if i and W[i - 1].id in kept and W[i - 1].source_file == w.source_file:
+            segs[-1].word_end = w.id
+        else:
+            segs.append(EditSegment(word_start=w.id, word_end=w.id, reason="edit_passes"))
+    return EditPlan(segments=segs, grid_fingerprint=grid.fingerprint())
+
+
+def cut_ranges(grid: WordGrid, cuts: List[Dict]) -> List[Dict]:
+    """Cuts as review ranges for the transcript editor: label "remove" (applied) or "suggest" (not
+    applied), with a readable reason and the review flag."""
+    by_id = grid.by_id()
+    out = []
+    for c in cuts:
+        ws = [by_id[i] for i in c["word_ids"]]
+        out.append({"word_start": ws[0].id, "word_end": ws[-1].id, "label": "remove" if c["applied"] else "suggest",
+                    "reason": f"{c['category'].replace('_', ' ')}: {c['reason']}", "review": bool(c.get("review")),
+                    "pass": c["pass"], "source_file": ws[0].source_file, "start": ws[0].start, "end": ws[-1].end,
+                    "text": c["text"], "conf": None, "by": None})
+    return sorted(out, key=lambda r: (r["source_file"], r["start"]))
+
+
+def edit_with_passes(grid: WordGrid) -> Tuple[EditPlan, List[Dict], List[Dict]]:
+    """Whole-job entry point: all passes on the full transcript -> (plan, UI ranges, per-pass stats)."""
+    kept, cuts, stats = run_passes(grid)
+    if not kept:
+        raise RuntimeError("edit passes removed every word; refusing to render an empty edit")
+    logger.info(f"[EDIT-PASS] job: {len(grid.words)} words -> kept {len(kept)}; "
+                f"{sum(c['applied'] for c in cuts)} cuts applied ({sum(c['applied'] and bool(c.get('review')) for c in cuts)} for review), "
+                f"{sum(not c['applied'] for c in cuts)} suggestions")
+    return plan_from_kept(grid, kept), cut_ranges(grid, cuts), stats
