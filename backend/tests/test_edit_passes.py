@@ -40,23 +40,26 @@ def test_invalid_ranges_rejected_and_uncertain_cuts_become_suggestions(monkeypat
     g = _grid(["so we start here", "this line is said once", "this line is said once again"])
     calls = []
 
-    def fake(model, system, user, categories):
+    def fake(model, system, user, categories, extra=None):
         calls.append(user)
-        return [{"attempt": 2, "from_word": 0, "to_word": 4, "category": "earlier_take", "reason": "r", "uncertain": True},
-                {"attempt": 9, "from_word": 0, "to_word": 1, "category": "earlier_take", "reason": "bad", "uncertain": False},
-                {"attempt": 1, "from_word": 0, "to_word": 0, "category": "earlier_take", "reason": "r", "uncertain": True}], \
+        return [{"attempt": 2, "from_word": 0, "to_word": 4, "category": "other_take", "reason": "r", "uncertain": True, "kept_attempt": 3},
+                {"attempt": 9, "from_word": 0, "to_word": 1, "category": "other_take", "reason": "bad", "uncertain": False, "kept_attempt": 3},
+                {"attempt": 1, "from_word": 0, "to_word": 0, "category": "other_take", "reason": "r", "uncertain": True, "kept_attempt": 2},
+                {"attempt": 3, "from_word": 0, "to_word": 5, "category": "other_take", "reason": "slip", "uncertain": False, "kept_attempt": 3}], \
                {"model": model, "input_tokens": 0, "output_tokens": 0, "cached": False}
     monkeypatch.setattr(ep, "_call", fake)
     cuts, st = ep.run_pass("retakes", g, {w.id for w in g.words})
     assert st["rejected"] == 1 and "Possible repeats" in calls[0]
-    by_attempt = {c["text"].split()[0]: c for c in cuts}
-    assert by_attempt["this"]["applied"] and by_attempt["this"]["review"]   # uncertain but wording-corroborated
+    by_attempt = {c["text"].split()[0]: c for c in cuts if not c["reason"].startswith("slip")}
+    assert by_attempt["this"]["applied"]                                      # uncertain but wording-corroborated
     assert not by_attempt["so"]["applied"]                                    # uncertain, no repeat found: suggestion
+    slip = [c for c in cuts if c["reason"].startswith("slip")][0]
+    assert not slip["applied"] and st["contradictions"] == 1                 # says it keeps the take it cuts
 
 
 def test_suggestion_only_pass_never_changes_the_edit(monkeypatch):
     g = _grid(["I I think so"])
-    monkeypatch.setattr(ep, "_call", lambda *a: ([{"attempt": 1, "from_word": 0, "to_word": 0, "category": "stutter",
+    monkeypatch.setattr(ep, "_call", lambda *a, **k: ([{"attempt": 1, "from_word": 0, "to_word": 0, "category": "stutter",
                                                   "reason": "r", "uncertain": False}],
                                                  {"model": "m", "input_tokens": 0, "output_tokens": 0, "cached": False}))
     kept, cuts, _ = ep.run_passes(g, passes=["inside_take"])
