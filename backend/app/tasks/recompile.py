@@ -64,7 +64,20 @@ def load_job_edit(job_id: str) -> Optional[Dict]:
         "word_out": word_out,
         "duration_sec": timeline_d["duration_sec"] if timeline_d else None,
         "validation": artifacts.load_job(job_id, "validation"),
+        "story": _story_view(job_id),
     }
+
+
+def _story_view(job_id: str) -> Optional[Dict]:
+    """Phase 9 candidate plans for the editor (None when the job has no story plan)."""
+    story = artifacts.load_job(job_id, "storyplan")
+    if story is None:
+        return None
+    moments = artifacts.load_job(job_id, "moments") or {"moments": []}
+    return {"target_sec": story["target_sec"], "full_sec": story["full_sec"],
+            "moments": [{k: m[k] for k in ("id", "function", "importance", "summary", "depends_on")} for m in moments["moments"]],
+            "plans": [{k: p.get(k) for k in ("strategy", "reasoning", "order", "duration_sec", "score", "repairs", "edit_plan")}
+                      for p in story["plans"]]}
 
 
 def recompile_job(job_id: str, plan: EditPlan, output_path: str) -> Tuple[CompiledTimeline, Dict]:

@@ -46,6 +46,7 @@ from app.tasks.assemble import assemble_vlog
 from app.tasks.compiler import compile_and_render
 from app.tasks.speech_cleanup import REVIEW, cleanup_plan, label_grid, label_ranges
 from app.tasks.edit_passes import edit_with_passes
+from app.utils import artifacts as artifacts_mod
 from app.tasks.recompile import recompile_job, save_job_edit
 from app.models import EditPlan
 from app.tasks.metadata import generate_metadata
@@ -458,6 +459,29 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
                 labels = label_grid(word_grid)
                 plan = cleanup_plan(word_grid, labels)
                 ranges = label_ranges(word_grid, labels)
+            story, moments_result, story_warnings = None, None, []
+            if settings.enable_story_plan:      # Phase 9: story order + target duration over the moment map
+                safe_broadcast("edl_generating", 80, "Mapping the story and planning the cut...")
+                try:
+                    from app.tasks.compiler import speaker_pause_targets
+                    from app.tasks.moments import build_moments
+                    from app.tasks.storyplan import edit_plan, plan_story
+                    index = {w.id: i for i, w in enumerate(word_grid.words)}
+                    kept = {word_grid.words[i].id for s_ in plan.segments
+                            for i in range(index[s_.word_start], index[s_.word_end] + 1)}
+                    moments_result = build_moments(word_grid, kept)
+                    story = plan_story(word_grid, moments_result, envs, speaker_pause_targets(word_grid, envs),
+                                       target_duration)
+                    for p_ in story["plans"]:
+                        p_["edit_plan"] = edit_plan(word_grid, moments_result["moments"], p_["order"]).model_dump()
+                    plan = EditPlan(**story["best"]["edit_plan"])
+                    best = story["best"]
+                    if target_duration and best["duration_sec"] > target_duration * 1.15:
+                        story_warnings.append(f"Target {target_duration:.0f}s not reachable without breaking the story: "
+                                              f"shortest valid cut is {best['duration_sec']:.0f}s.")
+                except Exception as e:          # never fail the job: fall back to the cleaned edit in source order
+                    logger.warning(f"[STORYPLAN] job {job_id}: story plan failed, using source order: {e}", exc_info=True)
+                    story_warnings.append(f"Story plan failed ({e}); edit kept in recording order.")
             safe_broadcast("assembling", 85, "Compiling and rendering the edit...")
             timeline, render_info = compile_and_render(plan, word_grid, envs, file_map, final_video_path)
             job_warnings = [
@@ -492,7 +516,15 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
             save_job_edit(job_id, word_grid, [{"filename": f["filename"], "path": file_map[f["filename"]],
                                                "audio_path": f["audio_path"]} for f in files_info],
                           plan, timeline, render_info, cleanup_ranges=ranges)
-            if settings.enable_moments:       # Phase 8: story beats for later duration-targeted plans
+            job_story_note = story_warnings
+            if story is not None:
+                artifacts_mod.save_job(job_id, "moments", moments_result)
+                artifacts_mod.save_job(job_id, "storyplan", story)
+            if job_story_note and job_id in jobs_db:
+                jobs_db[job_id].warnings.extend(job_story_note)
+            for w_ in job_story_note:
+                logger.warning(f"[STORYPLAN] {w_}")
+            if settings.enable_moments and story is None:  # Phase 8 only: story beats of the saved edit
                 safe_broadcast("assembling", 95, "Mapping the story (moments)...")
                 try:
                     from app.tasks.moments import moments_for_job
