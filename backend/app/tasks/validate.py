@@ -18,7 +18,7 @@ import logging
 from typing import Dict, List
 
 from app.models import (CHECK_FAIL, CHECK_PASS, CHECK_WARN, CUT_FLAG_FRAME_OFF, CUT_FLAG_IN_NOISE, CUT_FLAG_LONG_TAIL,
-                        CUT_FLAG_TIGHT,
+                        CUT_FLAG_TIGHT, CUT_FLAG_VALLEY,
                         CompiledTimeline, EditPlan, ValidationCheck, ValidationReport, WordGrid)
 from app.tasks.compiler import FPS, PlanError, _active, resolve_plan
 from app.utils.speech_activity import HOP_SEC, Envelope
@@ -79,7 +79,7 @@ def validate_structure(timeline: CompiledTimeline, plan: EditPlan, grid: WordGri
                 continue
             checked["cut_on_activity"] += 1
             on = bool(act[env.t2i(c.time)])
-            known = set(c.flags) & {CUT_FLAG_TIGHT, CUT_FLAG_LONG_TAIL, CUT_FLAG_IN_NOISE}
+            known = set(c.flags) & {CUT_FLAG_TIGHT, CUT_FLAG_LONG_TAIL, CUT_FLAG_IN_NOISE, CUT_FLAG_VALLEY}
             if on and not known:
                 rows.append(_row("cut_on_activity", CHECK_FAIL, k, f"unflagged {c.side} cut {c.time:.3f} on speech/loud audio",
                                  side=c.side, time=c.time))

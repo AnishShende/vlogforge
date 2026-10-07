@@ -26,7 +26,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from app.models import (CUT_FLAG_FRAME_OFF, CUT_FLAG_IN_NOISE, CUT_FLAG_LONG_TAIL, CUT_FLAG_TIGHT, CompiledSegment, CompiledTimeline,
+from app.models import (CUT_FLAG_FRAME_OFF, CUT_FLAG_IN_NOISE, CUT_FLAG_LONG_TAIL, CUT_FLAG_TIGHT, CUT_FLAG_VALLEY, CompiledSegment, CompiledTimeline,
                         CutPoint, EditPlan, WordGrid)
 from app.utils.speech_activity import HOP_SEC, MIN_SILENCE_SEC, Envelope
 
@@ -35,6 +35,9 @@ logger = logging.getLogger("VlogForge.Compiler")
 FPS = 30                    # output frame rate (render scales every source to 30 fps)
 TAIL_SEARCH_SEC = 0.5       # follow activity past a word edge at most this far
 MARGIN_SEC = 0.03           # minimum distance between a cut and any activity
+VALLEY_DB = 30.0            # a dip this far below the loudest frame on BOTH sides splits the activity
+VALLEY_MIN_SEC = 0.03       # ... if it lies at least this far past the word edge (not the word's own onset)
+VALLEY_WINDOW_DB = 6.0      # valley cut window: frames of the dip within this of its lowest level
 MAX_PAUSE_OUT_SEC = 0.25    # pause kept after the last word of a segment
 MAX_PAUSE_IN_SEC = 0.15     # pause kept before the first word of a segment
 TIGHT_SEC = 0.06            # activity gap below this: no pause to cut in
@@ -98,6 +101,43 @@ def activity_edge(env: Envelope, t: float, step: int, search_sec: float = TAIL_S
     return (max(t, (i + last + 1) * HOP_SEC), hit) if step > 0 else (min(t, (i - last) * HOP_SEC), hit)
 
 
+def valley_split(env: Envelope, t: float, edge: float, step: int) -> Optional[float]:
+    """Deepest dip between word edge t and activity edge `edge` that lies VALLEY_DB below the
+    loudest frame on both sides of it: the activity beyond is a separate, untranscribed sound
+    (stray stutter, click) that the word edge's activity ran into without a silence. User report
+    2026-10-07: a stray "I" 0.2 s before a kept "I" was kept. Returns the dip time or None."""
+    a, b = sorted((env.t2i(t), env.t2i(edge)))
+    if b - a < 3:
+        return None
+    db = env.db[a:b + 1]
+    idx = np.arange(a, b + 1)
+    best = None
+    for k in range(1, len(idx) - 1):
+        dist = abs(env.i2t(idx[k]) - t)
+        if dist < VALLEY_MIN_SEC:
+            continue
+        near = db[k + 1:] if step < 0 else db[:k]      # side of the word
+        far = db[:k] if step < 0 else db[k + 1:]       # beyond the dip
+        if near.size and far.size and min(near.max(), far.max()) - db[k] >= VALLEY_DB:
+            if best is None or db[k] < db[best]:
+                best = k
+    return None if best is None else float(env.i2t(idx[best]))
+
+
+def _valley_cut(env: Envelope, valley: float, side: str, word_edge: float, edge: float,
+                span: Tuple[float, float]) -> CutPoint:
+    """Cut at the dip; the window (for whole-frame snapping) is the stretch of the dip within
+    VALLEY_WINDOW_DB of its lowest level, kept between the two word edges (`span`)."""
+    i = lo = hi = env.t2i(valley)
+    floor = env.db[i] + VALLEY_WINDOW_DB
+    while lo > 0 and env.db[lo - 1] <= floor and env.i2t(lo - 1) >= span[0]:
+        lo -= 1
+    while hi < len(env.db) - 1 and env.db[hi + 1] <= floor and env.i2t(hi + 1) <= span[1]:
+        hi += 1
+    return CutPoint(time=valley, side=side, word_edge=word_edge, activity_edge=edge,
+                    window=[float(env.i2t(lo)), float(env.i2t(hi))], level_db=_level(env, valley), flags=[CUT_FLAG_VALLEY])
+
+
 def _level(env: Envelope, t: float) -> float:
     return float(env.db[env.t2i(t)])
 
@@ -156,6 +196,10 @@ def cut_out(env: Envelope, word_end: float, next_start: Optional[float], file_en
             max_pause: float = MAX_PAUSE_OUT_SEC, search_sec: float = TAIL_SEARCH_SEC) -> CutPoint:
     """Cut after a kept word; next_start is the following (unkept) word, None at file end."""
     edge, long_tail = activity_edge(env, word_end, +1, search_sec)
+    limit = edge if next_start is None else min(edge, next_start)
+    valley = valley_split(env, word_end, limit, +1)
+    if valley is not None:     # cut in the dip; the sound beyond it is not part of this word
+        return _valley_cut(env, valley, "out", word_end, edge, (word_end, limit))
     if next_start is None:
         bound, margin = file_end, 0.0
     else:
@@ -176,6 +220,10 @@ def cut_in(env: Envelope, word_start: float, prev_end: Optional[float], max_paus
            search_sec: float = TAIL_SEARCH_SEC) -> CutPoint:
     """Cut before a kept word; prev_end is the preceding (unkept) word, None at file start."""
     edge, long_tail = activity_edge(env, word_start, -1, search_sec)
+    limit = edge if prev_end is None else max(edge, prev_end)
+    valley = valley_split(env, word_start, limit, -1)
+    if valley is not None:     # cut at the dip; the sound beyond it is not part of this word
+        return _valley_cut(env, valley, "in", word_start, edge, (limit, word_start))
     if prev_end is None:
         bound, margin = 0.0, 0.0
     else:
