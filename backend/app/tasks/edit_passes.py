@@ -14,8 +14,9 @@ v2 (2026-10-07, after the v1 eval): whole takes first, small cleanups last; tag,
   4. final_review   (applied) dangling words, references to cut content, a point made twice.
   5. inside_take    (suggestions only) stutters, cut-off words, fillers inside kept takes.
 Uncertain cuts become suggestions for the review UI (like every inside_take cut), except retake
-choices that the wording detector corroborates: those are applied and flagged for review, since keeping
-both takes would repeat the line. (Dead gaps = compiler pause shortening; visual judgement deferred.)
+choices that the wording detector corroborates: those are applied (keeping both takes would repeat the
+line). For wording-matched takes, CODE picks the survivor (fewer internal repeats, more complete,
+earlier); the model's choice there was unstable between runs. (Dead gaps = compiler pause shortening; visual judgement deferred.)
 
 The transcript shown to the model is the CURRENT edit split into numbered attempts (pause >= 0.4 s
 or a cut between two words), each word with its index in the attempt. Results are cached by the
@@ -37,7 +38,7 @@ from app.utils import artifacts
 
 logger = logging.getLogger("VlogForge.EditPasses")
 
-PROMPT_VERSION = "3"
+PROMPT_VERSION = "4"
 ATTEMPT_PAUSE_SEC = 0.4
 CHUNK_WORDS = 160          # inside_take: target attempts per call, ~this many words
 CONTEXT_ATTEMPTS = 2       # inside_take: read-only attempts shown on each side of a chunk
@@ -72,7 +73,8 @@ want the cut: the creator reviews uncertain cuts."""
 PASSES: Dict[str, Dict] = {
     "retakes": {
         "model": LARGE_MODEL, "chunked": False, "applied": True,
-        "categories": ["earlier_take", "partial_take", "worse_take"],
+        "categories": ["other_take", "partial_take"],
+        "extra": {"kept_attempt": {"type": "integer"}},
         "task": """This pass handles REPEATED TAKES. The creator sometimes says the same line or makes the same
 point more than once because an attempt did not go well; the wording may be the same or different.
 A retake is an attempt the speaker ABANDONED and then said again: they stopped, restarted or redid it.
@@ -90,6 +92,8 @@ A take can start or end inside an attempt: remove word ranges, not only whole at
 Not retakes: lines said only once; deliberate repetition for emphasis or humour; a few words restated
 immediately inside flowing speech (that is normal talking, not a redo: leave it); statements that look
 alike but differ in numbers, names, negation or time (they may be different facts).
+For every cut, set kept_attempt to the number of the attempt holding the take you KEEP for that line;
+it must differ from the attempt you cut.
 "Possible repeats" below were found by matching wording. They are evidence, not decisions: confirm
 each from meaning, and also find repeats that use different words.""",
     },
@@ -251,12 +255,11 @@ def render_hints(hints: List[Dict]) -> str:
         f" ({h['shared']} words shared)" for h in sorted(hints, key=lambda h: (h["a"], h["b"])))
 
 
-def _schema(categories: List[str]) -> Dict:
-    cut = {"type": "object", "additionalProperties": False,
-           "required": ["attempt", "from_word", "to_word", "category", "reason", "uncertain"],
-           "properties": {"attempt": {"type": "integer"}, "from_word": {"type": "integer"},
-                          "to_word": {"type": "integer"}, "category": {"type": "string", "enum": categories},
-                          "reason": {"type": "string"}, "uncertain": {"type": "boolean"}}}
+def _schema(categories: List[str], extra: Optional[Dict] = None) -> Dict:
+    props = {"attempt": {"type": "integer"}, "from_word": {"type": "integer"},
+             "to_word": {"type": "integer"}, "category": {"type": "string", "enum": categories},
+             "reason": {"type": "string"}, "uncertain": {"type": "boolean"}, **(extra or {})}
+    cut = {"type": "object", "additionalProperties": False, "required": list(props), "properties": props}
     return {"type": "object", "additionalProperties": False, "required": ["cuts"],
             "properties": {"cuts": {"type": "array", "items": cut}}}
 
@@ -264,15 +267,15 @@ def _schema(categories: List[str]) -> Dict:
 _client: Optional[anthropic.Anthropic] = None
 
 
-def _call(model: str, system: str, user: str, categories: List[str]) -> Tuple[List[Dict], Dict]:
+def _call(model: str, system: str, user: str, categories: List[str], extra: Optional[Dict] = None) -> Tuple[List[Dict], Dict]:
     """One structured-output request, cached by its exact content. Returns (cuts, usage)."""
-    key = hashlib.sha256(json.dumps([PROMPT_VERSION, model, system, user, categories]).encode()).hexdigest()
+    key = hashlib.sha256(json.dumps([PROMPT_VERSION, model, system, user, categories, extra]).encode()).hexdigest()
     hit = artifacts.get("edit_pass", key)
     if hit is not None:
         return hit["cuts"], {**hit["usage"], "cached": True}
     global _client
     _client = _client or anthropic.Anthropic(api_key=settings.claude_api_key)
-    fmt = {"format": {"type": "json_schema", "schema": _schema(categories)}}
+    fmt = {"format": {"type": "json_schema", "schema": _schema(categories, extra)}}
     if model == LARGE_MODEL:     # Sonnet 5.5: adaptive thinking (default), server-side refusal fallback
         r = _client.beta.messages.create(model=model, max_tokens=16000, system=system,
                                          messages=[{"role": "user", "content": user}],
@@ -325,7 +328,7 @@ def run_pass(name: str, grid: WordGrid, kept: Set[str], model: Optional[str] = N
             hints = retake_hints(grid, atts)
             n_hints = len(hints)
             user += "\n\n" + render_hints(hints)
-        cs, u = _call(model, system, user, spec["categories"])
+        cs, u = _call(model, system, user, spec["categories"], spec.get("extra"))
         raw, usages = [(0, range(len(atts)), c) for c in cs], [u]
 
     hinted: Set[int] = set()        # grid word indices inside a wording-matched repeat (retakes only)
@@ -333,7 +336,7 @@ def run_pass(name: str, grid: WordGrid, kept: Set[str], model: Optional[str] = N
         for h in hints:
             hinted |= set(atts[h["a"]][h["a_words"][0]:h["a_words"][1] + 1])
             hinted |= set(atts[h["b"]][h["b_words"][0]:h["b_words"][1] + 1])
-    accepted, rejected = [], []
+    accepted, rejected, contradictions = [], [], 0
     for offset, allowed, c in raw:
         local = c["attempt"] - 1
         a = atts[offset + local] if local in allowed and 0 <= offset + local < len(atts) else None
@@ -341,53 +344,82 @@ def run_pass(name: str, grid: WordGrid, kept: Set[str], model: Optional[str] = N
             rejected.append(c)
             continue
         span = a[c["from_word"]:c["to_word"] + 1]
+        if name == "retakes":       # the take it says it keeps must exist and not be the one it cuts
+            k = c.get("kept_attempt", 0) - 1
+            if not 0 <= k < len(atts) or k == local or set(atts[k]) <= set(span):
+                c = {**c, "uncertain": True, "reason": c["reason"] + " [kept_attempt contradicts the cut: not applied]"}
+                contradictions += 1
         accepted.append({"pass": name, "category": c["category"], "reason": c["reason"], "uncertain": c["uncertain"],
                          # uncertain cuts become suggestions, except an uncertain retake choice that the
                          # wording detector corroborates: applied (else the line plays twice), flagged for review
                          "applied": spec["applied"] and (not c["uncertain"]
-                                                        or (name == "retakes" and len(set(span) & hinted) >= len(span) / 2)),
+                                                        or (name == "retakes" and "contradicts" not in c["reason"]
+                                                            and len(set(span) & hinted) >= len(span) / 2)),
                          "review": c["uncertain"],
                          "word_ids": [grid.words[i].id for i in span], "text": " ".join(grid.words[i].text for i in span)})
     if name == "retakes":
-        accepted = _fluency_tiebreak(grid, atts, hints, accepted)
+        accepted = _code_take_choice(grid, atts, hints, accepted)
     if rejected:
         logger.warning(f"[EDIT-PASS] {name}: rejected {len(rejected)} cut(s) with invalid attempt/word numbers: {rejected[:3]}")
     applied = [c for c in accepted if c["applied"]]
     stats = {"pass": name, "model": model, "calls": len(usages), "cached": sum(u["cached"] for u in usages),
              "input_tokens": sum(u["input_tokens"] for u in usages), "output_tokens": sum(u["output_tokens"] for u in usages),
              "hints": n_hints, "cuts": len(applied), "words_cut": len({i for c in applied for i in c["word_ids"]}),
-             "suggestions": len(accepted) - len(applied), "rejected": len(rejected)}
+             "suggestions": len(accepted) - len(applied), "rejected": len(rejected), "contradictions": contradictions}
     logger.info(f"[EDIT-PASS] {stats}")
     return accepted, stats
 
 
-def _fluency_tiebreak(grid: WordGrid, atts: List[List[int]], hints: List[Dict], cuts: List[Dict]) -> List[Dict]:
-    """For an UNCERTAIN take choice on a wording-matched pair, keep the side with fewer internal
-    repeats: the model may judge a stumbling take as if its stumble would be cleaned up."""
+def _code_take_choice(grid: WordGrid, atts: List[List[int]], hints: List[Dict], cuts: List[Dict]) -> List[Dict]:
+    """Which of two WORDING-MATCHED takes survives is decided here, not by the model (its choice
+    flipped between runs): keep the take with fewer stumbles, then the earlier one. When the model
+    cut the take this rule keeps, the cut moves to the other take (from its attempt start, so a
+    leading stumble goes too). Takes with the SAME words differ only in delivery, which text cannot
+    judge (the user picked earlier takes on some lines, later on others): flagged for review."""
     W = grid.words
     pos = {W[i].id: i for a in atts for i in a}
     out = list(cuts)
-    for h in hints:
-        side_a = atts[h["a"]][h["a_words"][0]:h["a_words"][1] + 1]
-        side_b = atts[h["b"]][h["b_words"][0]:h["b_words"][1] + 1]
-        for k, c in enumerate(out):
-            if not (c["applied"] and c["review"]):
+
+    def rank(att_idx: int, start: int) -> Tuple[int, int]:
+        att = atts[att_idx]        # stumbles inside the take (incl. a stumble before the shared words), then earlier
+        return (internal_repeats([_norm(W[i].text) for i in att]) + start, att_idx)
+
+    def words_of(att_idx: int, side: List[int]) -> List[str]:
+        return [_norm(W[i].text) for i in side if _norm(W[i].text) not in FILLERS]
+
+    for k, c in enumerate(out):
+        if not c["applied"]:
+            continue
+        span = {pos[i] for i in c["word_ids"] if i in pos}
+        for h in hints:                                     # strongest hint first
+            sa = atts[h["a"]][h["a_words"][0]:h["a_words"][1] + 1]
+            sb = atts[h["b"]][h["b_words"][0]:h["b_words"][1] + 1]
+            if len(span & set(sa)) > len(sa) / 2:
+                cut_i, keep_i, keep_side = h["a"], h["b"], sb
+            elif len(span & set(sb)) > len(sb) / 2:
+                cut_i, keep_i, keep_side = h["b"], h["a"], sa
+            else:
                 continue
-            span = {pos[i] for i in c["word_ids"] if i in pos}
-            cut_side, kept_side = (side_a, side_b) if len(span & set(side_a)) > len(side_a) / 2 else \
-                                  (side_b, side_a) if len(span & set(side_b)) > len(side_b) / 2 else (None, None)
-            if cut_side is None or any(c2["applied"] and set(c2["word_ids"]) & {W[i].id for i in kept_side} for c2 in out):
-                continue
-            r_cut = internal_repeats([_norm(W[i].text) for i in atts[h["a"] if cut_side is side_a else h["b"]]])
-            r_kept = internal_repeats([_norm(W[i].text) for i in atts[h["b"] if cut_side is side_a else h["a"]]])
-            if r_kept > r_cut:
-                att = atts[h["b"] if cut_side is side_a else h["a"]]
-                kept_side = att[:att.index(kept_side[-1]) + 1]     # from the attempt start: takes the stumble too
-                keep_ids = {W[i].id for i in kept_side}
-                out[k] = {**c, "word_ids": [W[i].id for i in kept_side], "text": " ".join(W[i].text for i in kept_side),
-                          "reason": f"{c['reason']} [swapped by code: the kept take repeated {r_kept} words, this one {r_cut}]"}
-                logger.info(f"[EDIT-PASS] retakes: swapped an uncertain take choice ({r_kept} vs {r_cut} repeated words)")
-                assert keep_ids
+            cut_start = h["a_words"][0] if cut_i == h["a"] else h["b_words"][0]
+            keep_start = h["b_words"][0] if cut_i == h["a"] else h["a_words"][0]
+            if rank(cut_i, cut_start) < rank(keep_i, keep_start):      # the rule keeps the cut take: swap
+                att = atts[keep_i]
+                new = att[:att.index(keep_side[-1]) + 1]
+                ids = {W[i].id for i in new}
+                if any(j != k and o["applied"] and set(o["word_ids"]) & ids for j, o in enumerate(out)):
+                    # the other take is already being cut by another cut: just keep this one
+                    out[k] = {**c, "applied": False, "review": True,
+                              "reason": f"{c['reason']} [not applied: code keeps this take (fewer stumbles, then earlier)]"}
+                    logger.info(f"[EDIT-PASS] retakes: code kept #{cut_i + 1} (other take already cut)")
+                    break
+                same = words_of(cut_i, sa if cut_i == h["a"] else sb) == words_of(keep_i, keep_side)
+                out[k] = {**c, "word_ids": [W[i].id for i in new], "text": " ".join(W[i].text for i in new),
+                          "review": same, "reason": f"{c['reason']} [take chosen by code: fewer stumbles, then earlier]"}
+                logger.info(f"[EDIT-PASS] retakes: code kept #{cut_i + 1} over #{keep_i + 1}")
+            else:
+                same = words_of(cut_i, sa if cut_i == h["a"] else sb) == words_of(keep_i, keep_side)
+                out[k] = {**c, "review": same}            # same words: a delivery choice for the creator
+            break
     return out
 
 
