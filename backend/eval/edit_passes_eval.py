@@ -137,8 +137,16 @@ def run(jobs: Dict[str, str], predictor: str) -> Dict[str, Dict]:
                                     "cuts": [{**c, "user": "cut" if set(c["word_ids"]) <= cut else
                                               "kept" if set(c["word_ids"]) <= kept else "mixed"} for c in cuts]}
                                    for name, k_after, cuts, st in trace]
-            sug = {i for _, _, cuts, _ in trace for c in cuts if not c["applied"] for i in c["word_ids"]}
+            sug = {i for _, _, cuts, _ in trace for c in cuts if not c["applied"] and c.get("action") != "restore"
+                   for i in c["word_ids"]} & pred
             out[clip]["suggestions"] = {"words": len(sug), "user_cut": len(sug & cut), "user_kept": len(sug & kept)}
+            ver = [c for _, _, cuts, _ in trace for c in cuts if c["pass"] == "verify"]
+            rm = {i for c in ver if c["action"] == "remove" for i in c["word_ids"]}
+            rs = {i for c in ver if c["action"] == "restore" for i in c["word_ids"]}
+            out[clip]["verify"] = {"remove_words": len(rm), "remove_user_cut": len(rm & cut), "remove_user_kept": len(rm & kept),
+                                   "missed_before": len(cut & pred), "restore_words": len(rs),
+                                   "restore_user_kept": len(rs & kept), "restore_user_cut": len(rs & cut),
+                                   "wrong_before": len(kept - pred)}
     return out
 
 
@@ -156,6 +164,11 @@ def report(results: Dict[str, Dict], predictor: str) -> str:
                          f"  over-cut {p['over_cut']:6.1%} ({p['over_cut_words']} w)  imperfect dropped {p['imperfect_dropped']}"
                          f"  | {st['model']} {st['calls']} call(s) ({st['cached']} cached), {st['input_tokens']}+{st['output_tokens']} tok,"
                          f" {st['cuts']} cuts, {st.get('suggestions', 0)} suggestions, {st['rejected']} rejected")
+        if "verify" in r:
+            v = r["verify"]
+            lines.append(f"  {clip:18} VERIFIER: remove {v['remove_words']} w (user cut {v['remove_user_cut']} of the "
+                         f"{v['missed_before']} still missed, user kept {v['remove_user_kept']}); restore {v['restore_words']} w "
+                         f"(user kept {v['restore_user_kept']} of the {v['wrong_before']} wrongly cut, user cut {v['restore_user_cut']})")
         if "suggestions" in r:
             sg = r["suggestions"]
             lines.append(f"  {clip:18} suggestions (not applied): {sg['words']} words, user cut {sg['user_cut']}, user kept {sg['user_kept']}")

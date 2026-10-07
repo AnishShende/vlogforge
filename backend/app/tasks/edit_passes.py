@@ -38,7 +38,7 @@ from app.utils import artifacts
 
 logger = logging.getLogger("VlogForge.EditPasses")
 
-PROMPT_VERSION = "4"
+PROMPT_VERSION = "4"   # verify pass has its own prompt below
 ATTEMPT_PAUSE_SEC = 0.4
 CHUNK_WORDS = 160          # inside_take: target attempts per call, ~this many words
 CONTEXT_ATTEMPTS = 2       # inside_take: read-only attempts shown on each side of a chunk
@@ -139,7 +139,24 @@ Do not remove whole sentences. Only attempts marked TARGET may be edited; CONTEX
 to help you understand.""",
     },
 }
-ORDER = ["retakes", "incomplete", "final_review", "inside_take"]
+PASSES["verify"] = {
+    "model": LARGE_MODEL, "chunked": False, "applied": False,
+    "categories": ["missed_false_start", "missed_retake", "missed_off_audience", "dangling", "wrongly_cut"],
+    "task": """You are the VERIFIER. Earlier passes already edited this transcript. You see ALL words in recording
+order; words inside braces like [3]{word} were CUT by the editor, all other words are KEPT and will be
+heard. Check the edit in both directions and report only clear mistakes:
+- action "remove": KEPT words a viewer should not hear. Typical misses: the kept start of an attempt
+  whose end was cut (the whole abandoned attempt should go: look at the cut words right after it), an
+  earlier take of a line that is said again later, a remark not meant for the audience, a word left
+  dangling by a cut.
+- action "restore": CUT words that should be kept: information said nowhere else, or a cut that breaks a
+  sentence that was otherwise fine.
+A range must contain only kept words (remove) or only cut words (restore). Report nothing when the
+edit is fine; never report filler words or small stumbles. Everything you report is shown to the
+creator as a suggestion.""",
+    "extra": {"action": {"type": "string", "enum": ["remove", "restore"]}},
+}
+ORDER = ["retakes", "incomplete", "final_review", "inside_take", "verify"]
 
 
 def attempts_of(grid: WordGrid, kept: Set[str]) -> List[List[int]]:
@@ -236,6 +253,48 @@ def internal_repeats(tokens: List[str], window: int = 12) -> int:
     return len(rep)
 
 
+def render_marked(grid: WordGrid, atts: List[List[int]], kept: Set[str]) -> str:
+    """All words, cut ones in braces: [3]{word}."""
+    W, lines = grid.words, []
+    for n, a in enumerate(atts):
+        t = W[a[0]].start
+        lines.append(f"#{n + 1} ({int(t // 60)}:{t % 60:04.1f}): " + " ".join(
+            f"[{k}]{W[i].text}" if W[i].id in kept else f"[{k}]{{{W[i].text}}}" for k, i in enumerate(a)))
+    return "\n".join(lines)
+
+
+def run_verify(grid: WordGrid, kept: Set[str], model: Optional[str] = None) -> Tuple[List[Dict], Dict]:
+    """Final check of the whole edit (cut words visible). Suggestions only: remove kept words or
+    restore cut words; a range mixing kept and cut words is trimmed to the side its action names."""
+    spec = PASSES["verify"]
+    model = model or spec["model"]
+    atts = attempts_of(grid, {w.id for w in grid.words})
+    cs, u = _call(model, COMMON + "\n\n" + spec["task"], render_marked(grid, atts, kept), spec["categories"], spec["extra"])
+    out, rejected = [], 0
+    for c in cs:
+        k = c["attempt"] - 1
+        if not 0 <= k < len(atts) or not 0 <= c["from_word"] <= c["to_word"] < len(atts[k]):
+            rejected += 1
+            continue
+        want_kept = c["action"] == "remove"
+        span = [i for i in atts[k][c["from_word"]:c["to_word"] + 1] if (grid.words[i].id in kept) == want_kept]
+        if not span:
+            rejected += 1
+            continue
+        runs = [[span[0]]]
+        for i in span[1:]:
+            (runs[-1].append(i) if i == runs[-1][-1] + 1 else runs.append([i]))
+        for run in runs:                                    # editor chips cover contiguous words
+            out.append({"pass": "verify", "category": c["category"], "reason": c["reason"], "uncertain": c["uncertain"],
+                        "applied": False, "review": False, "action": c["action"],
+                        "word_ids": [grid.words[i].id for i in run], "text": " ".join(grid.words[i].text for i in run)})
+    stats = {"pass": "verify", "model": model, "calls": 1, "cached": int(u["cached"]), "input_tokens": u["input_tokens"],
+             "output_tokens": u["output_tokens"], "hints": 0, "cuts": 0, "words_cut": 0, "suggestions": len(out),
+             "rejected": rejected, "contradictions": 0}
+    logger.info(f"[EDIT-PASS] {stats}")
+    return out, stats
+
+
 def render(grid: WordGrid, atts: List[List[int]], targets: Optional[range] = None) -> str:
     W, lines = grid.words, []
     for n, a in enumerate(atts):
@@ -307,6 +366,8 @@ def _chunks(atts: List[List[int]]) -> List[range]:
 def run_pass(name: str, grid: WordGrid, kept: Set[str], model: Optional[str] = None) -> Tuple[List[Dict], Dict]:
     """One pass on the current edit. Returns (validated cuts with word ids, stats). Each cut has
     `applied`: False for uncertain cuts and for suggestion-only passes."""
+    if name == "verify":
+        return run_verify(grid, kept, model)
     spec = PASSES[name]
     model = model or spec["model"]
     atts = attempts_of(grid, kept)
@@ -454,17 +515,31 @@ def plan_from_kept(grid: WordGrid, kept: Set[str]) -> EditPlan:
 
 
 def cut_ranges(grid: WordGrid, cuts: List[Dict]) -> List[Dict]:
-    """Cuts as review ranges for the transcript editor: label "remove" (applied) or "suggest" (not
-    applied), with a readable reason and the review flag."""
+    """Cuts as review ranges for the transcript editor: "remove" (applied), "suggest" (a cut not
+    applied) or "suggest_restore" (verifier: a cut that should be undone). Suggestions on the same
+    words from several passes are merged into one chip with all reasons; suggested cuts of words that
+    are already cut are dropped."""
     by_id = grid.by_id()
-    out = []
-    for c in cuts:
+    applied = {i for c in cuts if c["applied"] for i in c["word_ids"]}
+    chips: List[Dict] = []
+    for c in sorted(cuts, key=lambda c: (not c["applied"], -len(c["word_ids"]))):
+        label = "remove" if c["applied"] else ("suggest_restore" if c.get("action") == "restore" else "suggest")
+        ids = set(c["word_ids"])
+        if label == "suggest" and ids <= applied:
+            continue
+        reason = f"{c['pass'].replace('_', ' ')} · {c['category'].replace('_', ' ')}: {c['reason']}"
+        same = next((x for x in chips if x["label"] == label and label != "remove"
+                     and len(ids & x["_ids"]) >= min(len(ids), len(x["_ids"])) / 2), None)
+        if same:
+            same["reason"] += " | " + reason
+            continue
         ws = [by_id[i] for i in c["word_ids"]]
-        out.append({"word_start": ws[0].id, "word_end": ws[-1].id, "label": "remove" if c["applied"] else "suggest",
-                    "reason": f"{c['category'].replace('_', ' ')}: {c['reason']}", "review": bool(c.get("review")),
-                    "pass": c["pass"], "source_file": ws[0].source_file, "start": ws[0].start, "end": ws[-1].end,
-                    "text": c["text"], "conf": None, "by": None})
-    return sorted(out, key=lambda r: (r["source_file"], r["start"]))
+        chips.append({"word_start": ws[0].id, "word_end": ws[-1].id, "label": label, "reason": reason,
+                      "review": bool(c.get("review")), "pass": c["pass"], "source_file": ws[0].source_file,
+                      "start": ws[0].start, "end": ws[-1].end, "text": c["text"], "conf": None, "by": None, "_ids": ids})
+    for x in chips:
+        del x["_ids"]
+    return sorted(chips, key=lambda r: (r["source_file"], r["start"]))
 
 
 def edit_with_passes(grid: WordGrid) -> Tuple[EditPlan, List[Dict], List[Dict]]:
@@ -474,5 +549,5 @@ def edit_with_passes(grid: WordGrid) -> Tuple[EditPlan, List[Dict], List[Dict]]:
         raise RuntimeError("edit passes removed every word; refusing to render an empty edit")
     logger.info(f"[EDIT-PASS] job: {len(grid.words)} words -> kept {len(kept)}; "
                 f"{sum(c['applied'] for c in cuts)} cuts applied ({sum(c['applied'] and bool(c.get('review')) for c in cuts)} for review), "
-                f"{sum(not c['applied'] for c in cuts)} suggestions")
+                f"{sum(not c['applied'] for c in cuts)} suggestions ({sum(c['pass'] == 'verify' for c in cuts)} from the verifier)")
     return plan_from_kept(grid, kept), cut_ranges(grid, cuts), stats
