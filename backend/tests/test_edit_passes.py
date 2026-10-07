@@ -64,3 +64,17 @@ def test_suggestion_only_pass_never_changes_the_edit(monkeypatch):
                                                  {"model": "m", "input_tokens": 0, "output_tokens": 0, "cached": False}))
     kept, cuts, _ = ep.run_passes(g, passes=["inside_take"])
     assert kept == {w.id for w in g.words} and len(cuts) == 1 and not cuts[0]["applied"]
+
+
+def test_plan_and_ui_ranges_from_cuts():
+    g = _grid(["uh so we start here", "this line is said once"])
+    ids = [w.id for w in g.words]
+    cuts = [{"pass": "retakes", "category": "other_take", "reason": "r", "applied": True, "review": True,
+             "word_ids": ids[0:2], "text": "uh so"},
+            {"pass": "inside_take", "category": "filler", "reason": "f", "applied": False, "review": False,
+             "word_ids": ids[6:7], "text": "line"}]
+    kept = set(ids) - set(ids[0:2])
+    plan = ep.plan_from_kept(g, kept)
+    assert [(s.word_start, s.word_end) for s in plan.segments] == [(ids[2], ids[-1])] and not plan.validate_against(g)
+    ranges = ep.cut_ranges(g, cuts)
+    assert [(r["label"], r["review"]) for r in ranges] == [("remove", True), ("suggest", False)]

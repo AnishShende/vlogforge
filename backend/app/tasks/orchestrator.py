@@ -45,6 +45,7 @@ from app.tasks.edl import generate_edl
 from app.tasks.assemble import assemble_vlog
 from app.tasks.compiler import compile_and_render
 from app.tasks.speech_cleanup import REVIEW, cleanup_plan, label_grid, label_ranges
+from app.tasks.edit_passes import edit_with_passes
 from app.tasks.recompile import recompile_job, save_job_edit
 from app.models import EditPlan
 from app.tasks.metadata import generate_metadata
@@ -450,18 +451,29 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
             final_video_name = f"{job_id}.mp4"
             final_video_path = os.path.join(settings.output_dir, final_video_name)
             file_map = {f["filename"]: f.get("original_path") or f.get("cfr_path") for f in files_info}
-            labels = label_grid(word_grid)
-            plan = cleanup_plan(word_grid, labels)
+            if settings.enable_edit_passes:     # Phase 6.5: LLM passes (retakes, incomplete, review, suggestions)
+                safe_broadcast("edl_generating", 72, "Editing speech: retakes, false starts, final review...")
+                plan, ranges, _pass_stats = edit_with_passes(word_grid)
+            else:
+                labels = label_grid(word_grid)
+                plan = cleanup_plan(word_grid, labels)
+                ranges = label_ranges(word_grid, labels)
             safe_broadcast("assembling", 85, "Compiling and rendering the edit...")
             timeline, render_info = compile_and_render(plan, word_grid, envs, file_map, final_video_path)
-            ranges = label_ranges(word_grid, labels)
-            review = [r for r in ranges if r["label"] == REVIEW]
             job_warnings = [
                 "Word-grid edit: speech only; B-roll and target duration "
                 f"({target_duration}s) are not applied yet (output {timeline.duration_sec:.1f}s).",
             ]
-            job_warnings += [f"Review take at {r['start']:.1f}-{r['end']:.1f}s ({len(r['by']['alternatives'])} other "
-                             f"clean take(s)): \"{r['text'][:60]}\"" for r in review]
+            if settings.enable_edit_passes:
+                n_review = sum(1 for r in ranges if r["label"] == "remove" and r.get("review"))
+                n_sug = sum(1 for r in ranges if r["label"] == "suggest")
+                if n_review or n_sug:
+                    job_warnings.append(f"Edit passes: {n_review} take choice(s) to check, {n_sug} suggestion(s) "
+                                        "in the transcript editor.")
+            else:
+                review = [r for r in ranges if r["label"] == REVIEW]
+                job_warnings += [f"Review take at {r['start']:.1f}-{r['end']:.1f}s ({len(r['by']['alternatives'])} other "
+                                 f"clean take(s)): \"{r['text'][:60]}\"" for r in review]
             if render_info["validation"]["status"] != "pass":
                 job_warnings.append(f"Validation {render_info['validation']['status']}: " + ", ".join(
                     f"{c['check']} (segment {c['segment']})" for c in render_info["validation"]["checks"]
