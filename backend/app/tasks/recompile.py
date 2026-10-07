@@ -97,3 +97,32 @@ def recompile_job(job_id: str, plan: EditPlan, output_path: str) -> Tuple[Compil
     logger.info(f"[RECOMPILE] job {job_id}: {len(plan.segments)} plan segments -> {timeline.duration_sec:.2f}s, "
                 f"validation {info['validation']['status']}")
     return timeline, info
+
+
+def refresh_story(job_id: str, plan: EditPlan) -> str:
+    """After a manual re-compile: rebuild the moment map and the story-plan OPTIONS for the edited
+    version (Phases 8-9). Never changes the user's plan. Skipped when the kept words did not change
+    (a plan switch only reorders) or the job has no story data."""
+    old = artifacts.load_job(job_id, "moments")
+    story_old = artifacts.load_job(job_id, "storyplan")
+    if old is None and story_old is None:
+        return "no story data"
+    grid = WordGrid(**artifacts.load_job(job_id, "grid"))
+    index = {w.id: i for i, w in enumerate(grid.words)}
+    kept = {grid.words[i].id for s in plan.segments for i in range(index[s.word_start], index[s.word_end] + 1)}
+    if old is not None and kept == {i for m in old["moments"] for i in m["word_ids"]}:
+        return "unchanged"
+    from app.tasks.compiler import speaker_pause_targets
+    from app.tasks.moments import build_moments
+    from app.tasks.storyplan import edit_plan, plan_story
+    mo = build_moments(grid, kept)
+    artifacts.save_job(job_id, "moments", mo)
+    if story_old is not None:
+        files = artifacts.load_job(job_id, "files")
+        envs = {f["filename"]: envelope(load_audio(f["audio_path"])) for f in files}
+        story = plan_story(grid, mo, envs, speaker_pause_targets(grid, envs), story_old.get("target_sec"))
+        for p in story["plans"]:
+            p["edit_plan"] = edit_plan(grid, mo["moments"], p["order"]).model_dump()
+        artifacts.save_job(job_id, "storyplan", story)
+    logger.info(f"[RECOMPILE] job {job_id}: story refreshed for the edited version ({len(mo['moments'])} moments)")
+    return "refreshed"

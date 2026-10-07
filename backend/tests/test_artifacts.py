@@ -85,3 +85,14 @@ def test_rerun_archives_a_different_stored_plan():
     import os
     archived = [f for f in os.listdir(os.path.join(settings.artifact_dir, "jobs", "j2")) if f.startswith("plan.prev-")]
     assert len(archived) == 1 and artifacts.load_job("j2", archived[0][:-5]) == user.model_dump()
+
+
+def test_story_refresh_skips_when_kept_words_unchanged():
+    from app.models import EditSegment
+    from app.tasks.recompile import refresh_story
+    assert refresh_story("none", EditPlan(segments=[])) == "no story data"
+    words = [{"id": f"w{i}", "text": "x", "source_file": "a.mov", "start": i, "end": i + 0.5} for i in range(3)]
+    artifacts.save_job("j3", "grid", {"words": words})
+    artifacts.save_job("j3", "moments", {"moments": [{"word_ids": ["w0", "w1"]}, {"word_ids": ["w2"]}]})
+    reordered = EditPlan(segments=[EditSegment(word_start="w2", word_end="w2"), EditSegment(word_start="w0", word_end="w1")])
+    assert refresh_story("j3", reordered) == "unchanged"

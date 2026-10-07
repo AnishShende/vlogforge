@@ -778,6 +778,12 @@ def run_recompile_sync(job_id: str, plan: Dict, main_loop: asyncio.AbstractEvent
     except Exception as e:
         logger.error(f"Re-compile failed for job {job_id}: {e}", exc_info=True)
         broadcast("failed", 0, f"Re-compile error: {e}")
+        return
+    try:                                   # Phases 8-9: moments + plan options follow the edited version
+        from app.tasks.recompile import refresh_story
+        refresh_story(job_id, EditPlan.model_validate(plan))
+    except Exception as e:                 # the video is already done; story data is optional
+        logger.warning(f"[RECOMPILE] job {job_id}: story refresh failed: {e}")
 
 
 async def start_recompile(job_id: str, plan: Dict):
