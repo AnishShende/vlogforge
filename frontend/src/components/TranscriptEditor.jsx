@@ -34,12 +34,14 @@ const short = (t, n = 70) => (t && t.length > n ? t.slice(0, n - 1) + '…' : t)
 const reasonText = (r) => {
   if (r.label === 'remove' && r.reason === 'retake') return `retake (kept take at ${r.by?.start?.toFixed(1)}s)`;
   if (r.label === 'review') return `review: ${r.by?.alternatives?.length || 0} other clean take(s)`;
-  if (r.label === 'suggest') return `suggested · ${short(r.reason)}`;
+  if (r.label === 'suggest') return `suggested cut · ${short(r.reason)}`;
+  if (r.label === 'suggest_restore') return `restore? · ${short(r.reason)}`;
   if (r.label === 'remove' && r.review) return `⚑ check take · ${short(r.reason)}`;
   return short(r.reason);
 };
 const chipColors = (r) => r.label === 'remove' && !r.review ? ['rgba(239,68,68,0.12)', 'var(--danger)']
-  : r.label === 'suggest' ? ['rgba(139,92,246,0.15)', '#c4b5fd'] : ['rgba(245,158,11,0.12)', 'var(--warning)'];
+  : r.label === 'suggest' ? ['rgba(139,92,246,0.15)', '#c4b5fd']
+  : r.label === 'suggest_restore' ? ['rgba(16,185,129,0.15)', 'var(--success)'] : ['rgba(245,158,11,0.12)', 'var(--warning)'];
 
 const fmt = (s) => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, '0')}`;
 
@@ -239,7 +241,7 @@ export default function TranscriptEditor({ jobId, onReset }) {
             </span>
           )}
         </div>
-        <div style={{ ...muted, marginBottom: '0.75rem' }}>Click a word to jump to it · shift-click to select a run · <span style={{ color: 'var(--danger)' }}>red</span> = cut, <span style={{ color: 'var(--warning)' }}>⚑ amber</span> = take choice to check, <span style={{ color: '#c4b5fd' }}>purple</span> = suggested cut (click ✂ to apply) · ▶ plays it from the source</div>
+        <div style={{ ...muted, marginBottom: '0.75rem' }}>Click a word to jump to it · shift-click to select a run · <span style={{ color: 'var(--danger)' }}>red</span> = cut, <span style={{ color: 'var(--warning)' }}>⚑ amber</span> = take choice to check, <span style={{ color: '#c4b5fd' }}>purple</span> = suggested cut (✂ applies), <span style={{ color: 'var(--success)' }}>green</span> = suggested restore (↺ restores) · ▶ plays it from the source</div>
         <div style={{ overflowY: 'auto', lineHeight: 1.9, fontSize: '0.95rem', paddingRight: '0.5rem' }}>{out}</div>
       </div>
     </div>
