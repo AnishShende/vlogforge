@@ -443,7 +443,7 @@ def _code_take_choice(grid: WordGrid, atts: List[List[int]], hints: List[Dict], 
 
     def rank(att_idx: int, start: int) -> Tuple[int, int]:
         att = atts[att_idx]        # stumbles inside the take (incl. a stumble before the shared words), then earlier
-        return (internal_repeats([_norm(W[i].text) for i in att]) + start, att_idx)
+        return (internal_repeats([_norm(W[i].text) for i in att]) + start, -att_idx)   # then the LATER take
 
     def words_of(att_idx: int, side: List[int]) -> List[str]:
         return [_norm(W[i].text) for i in side if _norm(W[i].text) not in FILLERS]
@@ -484,6 +484,57 @@ def _code_take_choice(grid: WordGrid, atts: List[List[int]], hints: List[Dict], 
     return out
 
 
+DUP_MIN_SHARED = 5          # a kept line repeated with at least this many aligned words is a duplicate
+
+
+def no_duplicate_lines(grid: WordGrid, kept: Set[str]) -> List[Dict]:
+    """Hard guarantee after the applied passes: the same line is never kept twice. Local alignment over
+    the KEPT attempts; for every pair sharing DUP_MIN_SHARED+ words (2+ content words, no number or
+    negation difference) the copy with more stumbles, else the earlier one (creators redo a line until
+    it is right), is cut over its shared words (plus a short lead-in of <= 3 words). Applied, flagged
+    for review.""" 
+    W = grid.words
+    cuts: List[Dict] = []
+    while True:
+        atts = attempts_of(grid, kept)
+        toks = [[_norm(W[i].text) for i in a] for a in atts]
+        found = None
+        for x in range(len(atts)):
+            for y in range(x + 1, len(atts)):
+                if W[atts[x][0]].source_file != W[atts[y][0]].source_file:
+                    continue
+                _, pairs = local_align(toks[x], toks[y])
+                matched = [toks[x][i] for i, _ in pairs]
+                if len(matched) < DUP_MIN_SHARED or sum(t not in FUNCTION_WORDS for t in matched) < HINT_MIN_CONTENT:
+                    continue
+                (a0, b0), (a1, b1) = pairs[0], pairs[-1]
+                diff = set(toks[x][a0:a1 + 1]) ^ set(toks[y][b0:b1 + 1])
+                if any(t.replace(".", "").replace("%", "").isdigit() for t in diff) or diff & NEGATIONS:
+                    continue
+                found = (x, y, (a0, a1), (b0, b1), len(matched))
+                break
+            if found:
+                break
+        if not found:
+            return cuts
+        x, y, rx, ry, n = found
+        rep_x, rep_y = internal_repeats(toks[x]), internal_repeats(toks[y])
+        cut_i, (c0, c1) = (y, ry) if rep_y > rep_x else (x, rx)          # more stumbles, else the EARLIER copy:
+                                                                         # creators redo a line until it is right
+        if c0 <= 3:
+            c0 = 0                                                       # a short lead-in goes with it
+        span = atts[cut_i][c0:c1 + 1]
+        ids = [W[i].id for i in span]
+        kept -= set(ids)
+        keep_i = y if cut_i == x else x
+        cuts.append({"pass": "no_duplicates", "category": "repeated_line", "uncertain": True, "applied": True,
+                     "review": True, "word_ids": ids, "text": " ".join(W[i].text for i in span),
+                     "reason": f"same line already kept at {W[atts[keep_i][0]].start:.1f}s ({n} words shared); "
+                               f"kept the copy with fewer stumbles, else the later one"})
+        logger.info(f"[EDIT-PASS] no_duplicates: cut {len(ids)} words at {W[span[0]].start:.1f}s "
+                    f"(same line kept at {W[atts[keep_i][0]].start:.1f}s)")
+
+
 def run_passes(grid: WordGrid, kept: Optional[Set[str]] = None, passes: List[str] = ORDER,
                models: Optional[Dict[str, str]] = None) -> Tuple[Set[str], List[Dict], List[Dict]]:
     """All passes in order, each on the previous edit. Returns (kept ids, cuts incl. suggestions,
@@ -491,6 +542,10 @@ def run_passes(grid: WordGrid, kept: Optional[Set[str]] = None, passes: List[str
     kept = set(kept) if kept is not None else {w.id for w in grid.words}
     cuts, stats = [], []
     for name in passes:
+        if name == "inside_take":                # before the suggestion-only passes: hard no-duplicate rule
+            dup = no_duplicate_lines(grid, kept)
+            cuts += dup
+            stats.append({"pass": "no_duplicates", "cuts": len(dup), "kept_after": len(kept)})
         acc, st = run_pass(name, grid, kept, (models or {}).get(name))
         for c in acc:
             if c["applied"]:
