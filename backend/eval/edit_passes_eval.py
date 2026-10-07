@@ -98,6 +98,12 @@ def predict_edit_passes(job: str, grid: WordGrid, trace: Optional[List] = None) 
                 kept -= set(c["word_ids"])
         if trace is not None:
             trace.append((name, set(kept), cuts, st))
+        if name == "inside_take":
+            from app.tasks.edit_passes import no_repeated_phrases
+            rep = no_repeated_phrases(grid, kept)
+            if trace is not None:
+                trace.append(("no_repeats", set(kept), rep, {"pass": "no_repeats", "model": "-", "calls": 0, "cached": 0,
+                              "input_tokens": 0, "output_tokens": 0, "cuts": len(rep), "rejected": 0}))
     return kept
 
 

@@ -57,13 +57,20 @@ def test_invalid_ranges_rejected_and_uncertain_cuts_become_suggestions(monkeypat
     assert not slip["applied"] and st["contradictions"] == 1                 # says it keeps the take it cuts
 
 
-def test_suggestion_only_pass_never_changes_the_edit(monkeypatch):
-    g = _grid(["I I think so"])
-    monkeypatch.setattr(ep, "_call", lambda *a, **k: ([{"attempt": 1, "from_word": 0, "to_word": 0, "category": "stutter",
+def test_filler_phrases_stay_suggestions(monkeypatch):
+    g = _grid(["you know I think so"])
+    monkeypatch.setattr(ep, "_call", lambda *a, **k: ([{"attempt": 1, "from_word": 0, "to_word": 1, "category": "filler_phrase",
                                                   "reason": "r", "uncertain": False}],
                                                  {"model": "m", "input_tokens": 0, "output_tokens": 0, "cached": False}))
     kept, cuts, _ = ep.run_passes(g, passes=["inside_take"])
     assert kept == {w.id for w in g.words} and len(cuts) == 1 and not cuts[0]["applied"]
+
+
+def test_phrase_said_twice_in_a_row_loses_its_first_copy():
+    g = _grid(["because every because every partner counts", "it was very very good", "I I think so"])
+    kept = {w.id for w in g.words}
+    cuts = ep.no_repeated_phrases(g, kept)
+    assert [c["text"] for c in cuts] == ["because every", "I"]          # "very very" is emphasis: kept
 
 
 def test_plan_and_ui_ranges_from_cuts():
