@@ -5,10 +5,10 @@ runs compile + render + validation."""
 
 import logging
 import os
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from app.models import CompiledTimeline, EditPlan, WordGrid
-from app.tasks.compiler import compile_and_render
+from app.tasks.compiler import FPS, compile_and_render
 from app.utils import artifacts
 from app.utils.speech_activity import envelope, load_audio
 
@@ -29,6 +29,34 @@ def save_job_edit(job_id: str, grid: WordGrid, files: List[Dict], plan: EditPlan
 
 def can_recompile(job_id: str) -> bool:
     return artifacts.load_job(job_id, "grid") is not None and artifacts.load_job(job_id, "files") is not None
+
+
+def load_job_edit(job_id: str) -> Optional[Dict]:
+    """Review view of a job's stored edit (roadmap Phase 6): the words, cleanup ranges with their
+    reasons, the current plan, and where each kept word plays in the output. None = no stored edit."""
+    grid_d, files = artifacts.load_job(job_id, "grid"), artifacts.load_job(job_id, "files")
+    if grid_d is None or files is None:
+        return None
+    grid = WordGrid(**grid_d)
+    timeline_d = artifacts.load_job(job_id, "timeline")
+    word_out: Dict[str, float] = {}
+    if timeline_d:
+        by_id, t = grid.by_id(), 0.0
+        for s in timeline_d["segments"]:          # output time = segment's output offset + offset in source
+            for wid in s["word_ids"]:
+                word_out[wid] = round(t + by_id[wid].start - s["src_in"], 3)
+            t += round((s["src_out"] - s["src_in"]) * FPS) / FPS
+    return {
+        "job_id": job_id,
+        "files": [f["filename"] for f in files],
+        "words": [{"id": w.id, "text": w.text, "source_file": w.source_file, "start": w.start, "end": w.end}
+                  for w in grid.words],
+        "ranges": artifacts.load_job(job_id, "cleanup") or [],
+        "plan": artifacts.load_job(job_id, "plan"),
+        "word_out": word_out,
+        "duration_sec": timeline_d["duration_sec"] if timeline_d else None,
+        "validation": artifacts.load_job(job_id, "validation"),
+    }
 
 
 def recompile_job(job_id: str, plan: EditPlan, output_path: str) -> Tuple[CompiledTimeline, Dict]:

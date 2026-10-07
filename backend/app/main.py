@@ -237,11 +237,9 @@ def get_job_metadata(job_id: str):
 def download_vlog(job_id: str):
     """Download the final processed vlog MP4."""
     job = get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-
-    if job.status != "complete":
+    if job and job.status != "complete":
         raise HTTPException(status_code=400, detail="Vlog has not completed processing.")
+    # Not in memory (server restarted): serve the output file if it exists (Phase 6 review after restart)
 
     interaction_logger.log_interaction("download_vlog", {"job_id": job_id})
 
@@ -372,6 +370,16 @@ async def re_reason_job_endpoint(job_id: str, request: ReReasonRequest):
     await start_re_reasoning(job_id, request.quality_threshold)
 
     return {"status": "re-reasoning", "message": "Re-reasoning job started."}
+
+@app.get("/api/jobs/{job_id}/edit")
+def get_job_edit(job_id: str):
+    """Transcript review view of a word-grid job (roadmap Phase 6): words, cleanup ranges with
+    reasons, current plan, output time of each kept word. From the artifact store (survives a restart)."""
+    from app.tasks.recompile import load_job_edit
+    view = load_job_edit(job_id)
+    if view is None:
+        raise HTTPException(status_code=404, detail="No stored word-grid edit for this job")
+    return view
 
 @app.post("/api/jobs/{job_id}/recompile")
 async def recompile_job_endpoint(job_id: str, plan: EditPlan):
