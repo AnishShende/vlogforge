@@ -124,9 +124,10 @@ it and remove only:
 Make very few changes. Words that connect two sentences naturally are not dangling.""",
     },
     "inside_take": {
-        "model": SMALL_MODEL, "chunked": True, "applied": False,
+        "model": SMALL_MODEL, "chunked": True, "applied": True,      # user design: stutters/fillers are removed
+        "suggest_only": ["filler_phrase"],                          # stalling phrases stay suggestions
         "categories": ["stutter", "cut_off_word", "filler", "filler_phrase"],
-        "task": """This pass suggests small cleanups INSIDE sentences (the creator reviews each one):
+        "task": """This pass cleans small things INSIDE sentences (the creator can undo each one):
 1. stutter: a word or the start of a word said two or more times in a row by accident. Suggest
    removing the extra copies, keeping the last complete one. Deliberate repetition for emphasis
    ("very, very") is not a stutter.
@@ -413,7 +414,7 @@ def run_pass(name: str, grid: WordGrid, kept: Set[str], model: Optional[str] = N
         accepted.append({"pass": name, "category": c["category"], "reason": c["reason"], "uncertain": c["uncertain"],
                          # uncertain cuts become suggestions, except an uncertain retake choice that the
                          # wording detector corroborates: applied (else the line plays twice), flagged for review
-                         "applied": spec["applied"] and (not c["uncertain"]
+                         "applied": spec["applied"] and c["category"] not in spec.get("suggest_only", ()) and (not c["uncertain"]
                                                         or (name == "retakes" and "contradicts" not in c["reason"]
                                                             and len(set(span) & hinted) >= len(span) / 2)),
                          "review": c["uncertain"],
@@ -535,6 +536,37 @@ def no_duplicate_lines(grid: WordGrid, kept: Set[str]) -> List[Dict]:
                     f"(same line kept at {W[atts[keep_i][0]].start:.1f}s)")
 
 
+def no_repeated_phrases(grid: WordGrid, kept: Set[str]) -> List[Dict]:
+    """Hard rule inside kept speech: a phrase said twice in a row ("because every because every",
+    "I I") loses its first copy. Single repeated words only when they are short function words
+    ("I I", "the the"); "very very" stays (emphasis). Applied; the creator can undo each one."""
+    W = grid.words
+    cuts = []
+    for a in attempts_of(grid, kept):
+        t = [_norm(W[i].text) for i in a]
+        i = 0
+        while i < len(t):
+            hit = 0
+            for k in range(6, 0, -1):                            # longest repeat first
+                if i + 2 * k <= len(t) and t[i:i + k] == t[i + k:i + 2 * k] and \
+                        (k >= 2 or (t[i] in FUNCTION_WORDS or len(t[i]) <= 2)):
+                    hit = k
+                    break
+            if hit:
+                span = a[i:i + hit]
+                ids = [W[j].id for j in span]
+                kept -= set(ids)
+                cuts.append({"pass": "no_repeats", "category": "repeated_phrase", "uncertain": False, "applied": True,
+                             "review": False, "word_ids": ids, "text": " ".join(W[j].text for j in span),
+                             "reason": f"'{' '.join(W[j].text for j in span)}' said twice in a row; kept the second"})
+                i += hit
+            else:
+                i += 1
+    if cuts:
+        logger.info(f"[EDIT-PASS] no_repeats: cut {len(cuts)} repeated phrase(s)")
+    return cuts
+
+
 def run_passes(grid: WordGrid, kept: Optional[Set[str]] = None, passes: List[str] = ORDER,
                models: Optional[Dict[str, str]] = None) -> Tuple[Set[str], List[Dict], List[Dict]]:
     """All passes in order, each on the previous edit. Returns (kept ids, cuts incl. suggestions,
@@ -552,6 +584,10 @@ def run_passes(grid: WordGrid, kept: Optional[Set[str]] = None, passes: List[str
                 kept -= set(c["word_ids"])
         cuts += acc
         stats.append({**st, "kept_after": len(kept)})
+        if name == "inside_take":                # hard rule: no phrase twice in a row
+            rep = no_repeated_phrases(grid, kept)
+            cuts += rep
+            stats.append({"pass": "no_repeats", "cuts": len(rep), "kept_after": len(kept)})
     return kept, cuts, stats
 
 
