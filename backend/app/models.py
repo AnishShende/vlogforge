@@ -243,6 +243,7 @@ CUT_FLAG_TIGHT = "tight"            # no pause between the words: cut at the qui
 CUT_FLAG_LONG_TAIL = "long_tail"    # activity ran past the word edge longer than the search limit
 CUT_FLAG_FRAME_OFF = "frame_off"    # segment length could not be snapped to whole frames inside the window
 CUT_FLAG_IN_NOISE = "in_noise"      # dead-air cut placed in background noise (no words in the gap)
+CUT_FLAG_VALLEY = "valley"          # activity next to the word was split at a deep dip (untranscribed sound beyond it)
 
 
 class CutPoint(BaseModel):

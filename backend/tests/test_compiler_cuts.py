@@ -152,7 +152,7 @@ def test_properties_on_random_grids_and_plans():
                 assert not any(w.start + 1e-9 < c.time < w.end - 1e-9 for w in W)
                 assert c.window[0] - 1e-9 <= c.time <= c.window[1] + 1e-9
                 at_file_edge = c.time <= 1e-9 or c.time >= len(env.speech) * HOP_SEC - 1e-9  # not an edit
-                if not set(c.flags) & {CUT_FLAG_TIGHT, CUT_FLAG_LONG_TAIL} and not at_file_edge:  # in a pause
+                if not set(c.flags) & {CUT_FLAG_TIGHT, CUT_FLAG_LONG_TAIL, 'valley'} and not at_file_edge:  # in a pause
                     i = env.t2i(c.time)
                     assert not (env.speech[i] or env.loud[i]), (c, s)
             if CUT_FLAG_FRAME_OFF not in s.cut_out.flags:
@@ -223,7 +223,7 @@ def test_properties_hold_with_pause_shortening():
             for c in (s.cut_in, s.cut_out):
                 assert not any(w.start + 1e-9 < c.time < w.end - 1e-9 for w in W)
                 at_file_edge = c.time <= 1e-9 or c.time >= len(env.speech) * HOP_SEC - 1e-9
-                if not set(c.flags) & {CUT_FLAG_TIGHT, CUT_FLAG_LONG_TAIL, 'in_noise'} and not at_file_edge:
+                if not set(c.flags) & {CUT_FLAG_TIGHT, CUT_FLAG_LONG_TAIL, 'in_noise', 'valley'} and not at_file_edge:
                     i = env.t2i(c.time)
                     assert not (env.speech[i] or env.loud[i])
             if CUT_FLAG_FRAME_OFF not in s.cut_out.flags:
@@ -233,3 +233,16 @@ def test_properties_hold_with_pause_shortening():
                 assert _kept_pause(a, b) <= 0.5 + 1e-9
         spans = sorted((s.src_in, s.src_out) for s in segs)
         assert all(x[1] <= y[0] + 1e-9 for x, y in zip(spans, spans[1:]))
+
+
+def test_untranscribed_burst_before_word_is_split_off_at_the_dip():
+    """A stray sound (stutter) runs into the kept word's onset with only a deep dip, no silence,
+    between them: the cut goes in the dip, not before the stray sound (user report 2026-10-07)."""
+    speech = [(0.5, 0.8), (1.48, 1.60), (1.60, 1.75), (1.75, 2.2)]   # w0 | stray burst, dip, w1 (aligned late)
+    env = _env(3.0, speech=speech, dips=[(1.65 + k * HOP_SEC, -58.0) for k in range(5)])
+    g = _grid([(0.5, 0.8), (1.80, 2.2)])
+    seg = compile_plan(_plan(g, (1, 1)), g, {"a.mov": env})[0]
+    assert "valley" in seg.cut_in.flags
+    assert 1.65 - 1e-9 <= seg.src_in <= 1.70 + 1e-9                 # in the dip: stray burst left out
+    seg = compile_plan(_plan(g, (0, 0)), g, {"a.mov": env})[0]       # w0's cut out is a normal pause cut
+    assert "valley" not in seg.cut_out.flags
