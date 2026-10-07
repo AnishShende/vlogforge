@@ -492,6 +492,14 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
             save_job_edit(job_id, word_grid, [{"filename": f["filename"], "path": file_map[f["filename"]],
                                                "audio_path": f["audio_path"]} for f in files_info],
                           plan, timeline, render_info, cleanup_ranges=ranges)
+            if settings.enable_moments:       # Phase 8: story beats for later duration-targeted plans
+                safe_broadcast("assembling", 95, "Mapping the story (moments)...")
+                try:
+                    from app.tasks.moments import moments_for_job
+                    mo = moments_for_job(job_id)
+                    logger.info(f"[MOMENTS] job {job_id}: {len(mo['moments'])} moments stored")
+                except Exception as e:      # data for later phases: never fails the job
+                    logger.warning(f"[MOMENTS] job {job_id}: moment table not built: {e}")
         else:
             # ---- Legacy path: EDL reasoning + assembly ----
 
