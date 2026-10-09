@@ -4,6 +4,7 @@ import UploadPanel from './components/UploadPanel';
 import ProcessingMonitor from './components/ProcessingMonitor';
 import VideoPreview from './components/VideoPreview';
 import TranscriptEditor from './components/TranscriptEditor';
+import PublishPanel from './components/PublishPanel';
 import DownloadPanel from './components/DownloadPanel';
 import * as tus from 'tus-js-client';
 
@@ -654,9 +655,9 @@ export default function App() {
         >
           <div 
             style={{
-              background: 'var(--bg-main)',
-              borderRadius: 'var(--radius-xl)',
-              maxWidth: '800px',
+              background: 'var(--bg-color)',
+              borderRadius: 'var(--radius-lg)',
+              maxWidth: '820px',
               width: '100%',
               maxHeight: '90vh',
               overflowY: 'auto',
@@ -689,6 +690,9 @@ export default function App() {
             </button>
             
             <div style={{ padding: '2rem' }}>
+              {hasGridEdit ? (
+                <PublishPanel jobId={jobId} onReset={() => { setShowExportModal(false); resetProject(); }} />
+              ) : (
               <DownloadPanel 
                 jobId={jobId} 
                 downloadUrl={downloadUrl} 
@@ -697,6 +701,7 @@ export default function App() {
                   resetProject();
                 }} 
               />
+              )}
             </div>
           </div>
         </div>

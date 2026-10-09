@@ -381,6 +381,82 @@ def get_job_edit(job_id: str):
         raise HTTPException(status_code=404, detail="No stored word-grid edit for this job")
     return view
 
+@app.get("/api/jobs/{job_id}/waveform")
+def get_job_waveform(job_id: str):
+    """Peak levels of the rendered output for the review timeline (cached per output file)."""
+    from app.tasks.review_export import output_waveform
+    wave = output_waveform(job_id)
+    if wave is None:
+        raise HTTPException(status_code=404, detail="Final video output file not found on disk.")
+    return {"rate": wave["rate"], "peaks": wave["peaks"]}
+
+@app.get("/api/jobs/{job_id}/export/{fmt}")
+def export_job_edit(job_id: str, fmt: str, name: Optional[str] = None):
+    """The last render's edit decision list for another editor: fmt 'edl' (CMX3600) or 'fcpxml'."""
+    from fastapi.responses import Response
+    from app.tasks.review_export import export_edl, export_fcpxml
+    if fmt not in ("edl", "fcpxml"):
+        raise HTTPException(status_code=400, detail="fmt must be 'edl' or 'fcpxml'")
+    title = (name or f"VlogForge {job_id[:8]}").strip()[:60]
+    body = (export_edl if fmt == "edl" else export_fcpxml)(job_id, title)
+    if body is None:
+        raise HTTPException(status_code=404, detail="No stored render for this job")
+    interaction_logger.log_interaction("export_edit", {"job_id": job_id, "format": fmt})
+    filename = "".join(c if c.isalnum() or c in "-_ " else "_" for c in title) + f".{fmt}"
+    return Response(content=body, media_type="application/xml" if fmt == "fcpxml" else "text/plain",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+@app.get("/api/jobs/{job_id}/layouts")
+def get_job_layouts(job_id: str):
+    """Export layouts (16:9, 9:16, 1:1, 4:5) of the last render, each with its status."""
+    from app.tasks.layouts import list_layouts, source_dims
+    from app.utils.ffmpeg import RENDER_SIZE
+    rows = list_layouts(job_id)
+    if rows is None:
+        raise HTTPException(status_code=404, detail="No stored render for this job")
+    return {"layouts": rows, "main_size": list(RENDER_SIZE), "sources": source_dims(job_id)}
+
+@app.post("/api/jobs/{job_id}/layouts/{key}/render")
+def render_job_layout(job_id: str, key: str):
+    """Render the last render's edit in another frame shape (background; poll GET .../layouts)."""
+    from app.tasks.layouts import LAYOUTS, MAIN, list_layouts, start_render
+    if key not in LAYOUTS or key == MAIN:
+        raise HTTPException(status_code=400, detail=f"Unknown or main layout: {key}")
+    if list_layouts(job_id) is None:
+        raise HTTPException(status_code=404, detail="No stored render for this job")
+    started = start_render(job_id, key)
+    interaction_logger.log_interaction("render_layout", {"job_id": job_id, "layout": key, "started": started})
+    return {"status": "rendering", "started": started}
+
+@app.get("/api/jobs/{job_id}/layouts/{key}/download")
+def download_job_layout(job_id: str, key: str):
+    """Download a rendered layout MP4."""
+    from app.tasks.layouts import LAYOUTS, layout_path
+    if key not in LAYOUTS:
+        raise HTTPException(status_code=400, detail=f"Unknown layout: {key}")
+    path = layout_path(job_id, key)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="This layout has not been rendered yet.")
+    return FileResponse(path=path, media_type="video/mp4", filename=f"vlogforge_{job_id[:8]}_{LAYOUTS[key]['ratio'].replace(':', 'x')}.mp4")
+
+@app.get("/api/jobs/{job_id}/publish")
+def get_publish_copy(job_id: str, format: str = "auto", regenerate: bool = False):
+    """Post copy for the last render: Reels/Shorts caption + hashtags (< 60 s) or YouTube title,
+    description, chapters + hashtags. format: auto | short | long. Cached per render."""
+    from app.tasks.publish_copy import publish_copy
+    if format not in ("auto", "short", "long"):
+        raise HTTPException(status_code=400, detail="format must be auto, short or long")
+    try:
+        copy = publish_copy(job_id, format, regenerate)
+    except Exception as e:
+        logger.error(f"Post copy failed for job {job_id}: {e}", exc_info=True)
+        msg = ((getattr(e, "body", None) or {}).get("error") or {}).get("message") or str(e)   # API errors: their message only
+        raise HTTPException(status_code=502, detail=f"Could not write the post copy: {msg}")
+    if copy is None:
+        raise HTTPException(status_code=404, detail="No stored render for this job")
+    interaction_logger.log_interaction("publish_copy", {"job_id": job_id, "format": copy["format"], "variant": copy["variant"]})
+    return copy
+
 @app.post("/api/jobs/{job_id}/recompile")
 async def recompile_job_endpoint(job_id: str, plan: EditPlan):
     """Re-compile a word-grid job with an edited plan (word ranges). Re-runs compile + render

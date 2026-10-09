@@ -42,7 +42,11 @@ export default function DownloadPanel({ jobId, downloadUrl, onReset }) {
 
   const downloadJson = (endpoint, filename) => {
     fetch(endpoint)
-      .then((res) => res.json())
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || res.statusText);   // never save an error body as the file
+        return data;
+      })
       .then((data) => {
         const jsonString = `data:text/json;charset=utf-8,${encodeURIComponent(
           JSON.stringify(data, null, 2)
