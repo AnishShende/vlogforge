@@ -51,3 +51,9 @@ docs/
 
 # Phase 5 artifact store (stage results; may hold transcripts of user footage)
 artifacts/
+
+# Root-level scratch scripts, notes and diagrams stay local (README.md is the only root doc)
+/*.py
+/*.md
+!/README.md
+/*.excalidraw
