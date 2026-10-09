@@ -464,14 +464,16 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
                 safe_broadcast("edl_generating", 80, "Mapping the story and planning the cut...")
                 try:
                     from app.tasks.compiler import speaker_pause_targets
-                    from app.tasks.moments import build_moments
+                    from app.tasks.moments import build_moments, clip_order
                     from app.tasks.storyplan import edit_plan, plan_story
                     index = {w.id: i for i, w in enumerate(word_grid.words)}
                     kept = {word_grid.words[i].id for s_ in plan.segments
                             for i in range(index[s_.word_start], index[s_.word_end] + 1)}
-                    moments_result = build_moments(word_grid, kept)
+                    clips = clip_order([{"filename": f["filename"], "path": file_map[f["filename"]]} for f in files_info])
+                    moments_result = build_moments(word_grid, kept, clips)
                     story = plan_story(word_grid, moments_result, envs, speaker_pause_targets(word_grid, envs),
                                        target_duration)
+                    story_warnings += story["warnings"]
                     for p_ in story["plans"]:
                         p_["edit_plan"] = edit_plan(word_grid, moments_result["moments"], p_["order"]).model_dump()
                     plan = EditPlan(**story["best"]["edit_plan"])
@@ -532,10 +534,10 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
                     logger.info(f"[MOMENTS] job {job_id}: {len(mo['moments'])} moments stored")
                 except Exception as e:      # data for later phases: never fails the job
                     logger.warning(f"[MOMENTS] job {job_id}: moment table not built: {e}")
-        else:
-            # ---- Legacy path: EDL reasoning + assembly ----
             from app.tasks.publish_copy import schedule_background
             schedule_background(job_id)             # export panel post copy, once the render settles
+        else:
+            # ---- Legacy path: EDL reasoning + assembly ----
 
             # ---- Stage 6: EDL Generation ----
             check_cancelled()
@@ -786,10 +788,10 @@ def run_recompile_sync(job_id: str, plan: Dict, main_loop: asyncio.AbstractEvent
         refresh_story(job_id, EditPlan.model_validate(plan))
     except Exception as e:                 # the video is already done; story data is optional
         logger.warning(f"[RECOMPILE] job {job_id}: story refresh failed: {e}")
-
-
     from app.tasks.publish_copy import schedule_background
     schedule_background(job_id)            # post copy for the new render (after the refreshed moments)
+
+
 async def start_recompile(job_id: str, plan: Dict):
     """Spawn the re-compile in a background worker thread."""
     main_loop = asyncio.get_running_loop()

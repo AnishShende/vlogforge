@@ -122,12 +122,12 @@ def refresh_story(job_id: str, plan: EditPlan) -> str:
     if old is not None and kept == {i for m in old["moments"] for i in m["word_ids"]}:
         return "unchanged"
     from app.tasks.compiler import speaker_pause_targets
-    from app.tasks.moments import build_moments
+    from app.tasks.moments import build_moments, clip_order
     from app.tasks.storyplan import edit_plan, plan_story
-    mo = build_moments(grid, kept)
+    files = artifacts.load_job(job_id, "files")
+    mo = build_moments(grid, kept, clip_order(files))
     artifacts.save_job(job_id, "moments", mo)
     if story_old is not None:
-        files = artifacts.load_job(job_id, "files")
         envs = {f["filename"]: envelope(load_audio(f["audio_path"])) for f in files}
         story = plan_story(grid, mo, envs, speaker_pause_targets(grid, envs), story_old.get("target_sec"))
         for p in story["plans"]:
