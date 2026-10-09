@@ -1,15 +1,19 @@
 """Story plans (roadmap Phase 9, Archdoc Stages 8-9, small version): which moments to keep and in what
 order, for a target duration.
 
-  1. candidates   one Sonnet call: three plans over the moment table (story_order, cold_open, tight),
-                  reasoning first, each an ordered list of moment ids
+  1. candidates   story_order is built in code from the moment table's structure (story_order()):
+                  intro, then the body sections, then outro. Section order, in priority: the order the
+                  creator states (a moment that announces parts plays right before the first of them
+                  that has footage), then the moment model's section_order (when things happened, then
+                  topic logic). One Sonnet call adds two variants of it: cold_open and tight.
   2. repair       code enforces the hard rules: known moments only, no duplicates; every moment after
                   the moments it depends on (missing ones inserted before it); duration within
                   DURATION_TOLERANCE of the target by dropping the least important moment nothing else
                   needs, or adding back the most important one. When the whole edit already fits the
                   target, every moment is kept: only the ORDER can change.
-  3. score        deterministic: importance kept, fit to the target, story shape (an opening function
-                  first, a closing function last), exact durations from the compiler
+  3. score        deterministic: importance kept, fit to the target, story shape (intro first, outro
+                  last, stated orders kept; without roles: an opening function first, a closing one
+                  last), exact durations from the compiler
 The best plan becomes the edit; all candidates are stored for the review UI.
 """
 
@@ -27,33 +31,33 @@ from app.utils import artifacts
 
 logger = logging.getLogger("VlogForge.StoryPlan")
 
-PROMPT_VERSION = "1"
+PROMPT_VERSION = "2"
 MODEL = "claude-sonnet-5-5"
-STRATEGIES = ["story_order", "cold_open", "tight"]
+VARIANTS = ["cold_open", "tight"]                      # the model's plans; story_order is built in code
 DURATION_TOLERANCE = 0.15
 OPENING = {"hook", "orientation", "goal"}
 CLOSING = {"conclusion", "reflection", "payoff"}
 W_IMPORTANCE, W_FIT, W_SHAPE = 0.5, 0.3, 0.2
 
-SYSTEM = """You plan the final cut of a video in which one creator talks to the camera. You get a table of
-its MOMENTS (story beats of the already-cleaned edit): id, source clip and position in the recording,
-story function, importance (0-1), the earlier moments it needs, duration and summary. The moments are
-listed in the order the raw footage happens to be in, which may not be the right story order (for
-example a sign-off recorded or filed first).
+SYSTEM = """You plan variants of the final cut of a video in which one creator talks to the camera. You get
+a table of its MOMENTS (story beats of the already-cleaned edit): id, source clip and position in it,
+role (intro / body / outro), section, story function, importance (0-1), the earlier moments it needs,
+duration and summary; and the STORY ORDER: the intro, then the parts in the order the creator stated
+or in which they happened, then the outro.
 
-Make three plans, each an ordered list of moment ids:
-- story_order: the most natural order for a viewer: open with a welcome, hook or goal, then the body,
-  and end with the conclusion or sign-off;
-- cold_open: open with the strongest moment (a striking claim, payoff or reveal), then the story;
-- tight: only the main thread, for viewers in a hurry.
-Rules for every plan: a moment must come after every moment it needs; if the full edit is longer than
-the target duration, leave out the least important moments to get close to the target; if it already
-fits, keep every moment and only choose the order. Think about the order first, then give the plans."""
+Make two variants of the story order, each an ordered list of moment ids:
+- cold_open: first the strongest moment (a striking claim, payoff or reveal), then the story order
+  without it;
+- tight: only the main thread of the story order, for viewers in a hurry.
+Rules for both: apart from what the variant changes, keep the story order; a moment must come after
+every moment it needs; if the full edit is longer than the target duration, leave out the least
+important moments to get close to the target; if it already fits, keep every moment. Think about the
+order first, then give the plans."""
 
 
 def _schema() -> Dict:
     plan = {"type": "object", "additionalProperties": False, "required": ["strategy", "reasoning", "order"],
-            "properties": {"strategy": {"type": "string", "enum": STRATEGIES}, "reasoning": {"type": "string"},
+            "properties": {"strategy": {"type": "string", "enum": VARIANTS}, "reasoning": {"type": "string"},
                            "order": {"type": "array", "items": {"type": "string"}}}}
     return {"type": "object", "additionalProperties": False, "required": ["plans"],
             "properties": {"plans": {"type": "array", "items": plan}}}
@@ -106,10 +110,11 @@ def duration(grid: WordGrid, moments: List[Dict], order: List[str], envs, pause_
 
 
 def repair(order: List[str], moments: List[Dict], durs: Dict[str, float], target: Optional[float],
-           full: float) -> Tuple[List[str], List[str]]:
-    """Enforce the hard rules on a candidate order. Returns (order, notes)."""
+           full: float, ref: Optional[List[str]] = None) -> Tuple[List[str], List[str]]:
+    """Enforce the hard rules on a candidate order. Moments added back go to their place in `ref`
+    (the story order; default: listing order). Returns (order, notes)."""
     by_id, notes = {m["id"]: m for m in moments}, []
-    rank = {m["id"]: k for k, m in enumerate(moments)}
+    rank = {mid: k for k, mid in enumerate(ref or [m["id"] for m in moments])}
     seen, out = set(), []
     for mid in order:                                   # known, once
         if mid in by_id and mid not in seen:
@@ -139,7 +144,7 @@ def repair(order: List[str], moments: List[Dict], durs: Dict[str, float], target
         missing = [m["id"] for m in moments if m["id"] not in out]   # it all fits: keep every moment
         if missing:
             notes.append(f"added back {len(missing)} moment(s): the full edit fits the target")
-            for mid in missing:                          # at its recording position
+            for mid in missing:                          # at its place in the reference order
                 prev = [m for m in out if rank[m] < rank[mid]]
                 k = out.index(prev[-1]) + 1 if prev else 0
                 out = with_deps(out[:k] + [mid] + out[k:])
@@ -158,18 +163,89 @@ def repair(order: List[str], moments: List[Dict], durs: Dict[str, float], target
         if not cand:
             break
         add = max(cand, key=lambda m: m["importance"])["id"]
-        prev = [m for m in out if rank[m] < rank[add]]       # at its recording position
+        prev = [m for m in out if rank[m] < rank[add]]       # at its place in the reference order
         k = out.index(prev[-1]) + 1 if prev else 0
         out = with_deps(out[:k] + [add] + out[k:])
         notes.append(f"added {add} back for duration")
     return out, notes
 
 
+def story_order(moments: List[Dict], section_order: List[str]) -> Dict:
+    """The story order, built in code: intro, then the body by section, then outro (listing order
+    within each). Sections: the creator's stated order (moments that announce parts) wins over the
+    model's section_order; sections it leaves out follow in listing order. A moment that announces
+    parts plays right before the first of them that has footage; one whose parts have no footage at
+    all (a teaser for another video) stays in its own section, or ends the body.
+    Returns {order, sections, notes, warnings}."""
+    notes, warnings = [], []
+    body = [m for m in moments if m.get("role", "body") == "body"]
+    footage = list(dict.fromkeys(m.get("section", "") for m in body if not m.get("announces")))
+    secs = [s for s in section_order if s in footage]
+    secs += [s for s in footage if s not in secs]
+    stated: Dict[str, List[str]] = {}                   # lead-in id -> its parts with footage, stated order
+    for m in body:
+        if not m.get("announces"):
+            continue
+        missing = [s for s in m["announces"] if s not in footage]
+        if missing:
+            warnings.append(f"{m['id']} announces {', '.join(missing)}, but there is no footage of it")
+        parts = [s for s in m["announces"] if s in footage]
+        if parts:                                       # the stated order wins: same slots, stated order
+            for k, s in zip(sorted(secs.index(s) for s in parts), parts):
+                secs[k] = s
+            stated[m["id"]] = parts
+    for mid, parts in stated.items():
+        if [s for s in secs if s in parts] != parts:
+            warnings.append(f"{mid}: stated order {' -> '.join(parts)} conflicts with a later statement; "
+                            "followed the later one")
+    before: Dict[str, List[str]] = {}
+    for mid, parts in stated.items():
+        before.setdefault(min(parts, key=secs.index), []).append(mid)
+    order = [m["id"] for m in moments if m.get("role") == "intro"]
+    for s in secs:
+        order += before.get(s, []) + [m["id"] for m in body if m.get("section") == s and m["id"] not in stated]
+    rest = [m["id"] for m in body if m["id"] not in order]
+    if rest:
+        notes.append(f"{', '.join(rest)}: no section with footage; placed at the end of the body")
+    order += rest + [m["id"] for m in moments if m.get("role") == "outro"]
+    pos = {mid: k for k, mid in enumerate(order)}
+    for c in dict.fromkeys(m.get("clip") for m in body):   # inside one continuous clip: recording order
+        seq = [m["id"] for m in body if m.get("clip") == c and m["id"] not in stated]
+        if sorted(seq, key=pos.get) != seq:
+            notes.append(f"clip {c}: moments reordered within one continuous clip")
+    return {"order": order, "sections": secs, "notes": notes, "warnings": warnings}
+
+
+def structure(order: List[str], moments: List[Dict]) -> Optional[float]:
+    """Share of the structure rules `order` keeps (intro first, outro last, every stated order of the
+    parts present, its announcement before them); None when the moments carry no structure."""
+    by_id, pos = {m["id"]: m for m in moments}, {mid: k for k, mid in enumerate(order)}
+    checks = []
+    for role, first in (("intro", True), ("outro", False)):
+        mine = [pos[m] for m in order if by_id[m].get("role") == role]
+        other = [pos[m] for m in order if by_id[m].get("role") != role]
+        if mine and other:
+            checks.append(max(mine) < min(other) if first else min(mine) > max(other))
+    start: Dict[str, int] = {}
+    for m in order:
+        if not by_id[m].get("announces") and by_id[m].get("role", "body") == "body":
+            start.setdefault(by_id[m].get("section", ""), pos[m])
+    for m in order:
+        parts = [s for s in by_id[m].get("announces") or [] if s in start]
+        if parts:
+            firsts = [start[s] for s in parts]
+            checks.append(pos[m] < firsts[0] and firsts == sorted(firsts))
+    return sum(checks) / len(checks) if checks else None
+
+
 def score(order: List[str], moments: List[Dict], dur: float, target: Optional[float]) -> Dict:
     by_id = {m["id"]: m for m in moments}
     imp = sum(by_id[m]["importance"] for m in order) / max(1e-9, sum(m["importance"] for m in moments))
     fit = 1.0 if target is None else max(0.0, 1 - abs(dur - target) / target)
-    shape = 0.5 * (by_id[order[0]]["function"] in OPENING) + 0.5 * (by_id[order[-1]]["function"] in CLOSING) if order else 0
+    shape = structure(order, moments) if order else 0
+    if shape is None:
+        shape = 0.5 * (by_id[order[0]]["function"] in OPENING) + 0.5 * (by_id[order[-1]]["function"] in CLOSING)
+    shape = round(shape, 3)
     return {"importance_kept": round(imp, 3), "fit": round(fit, 3), "shape": shape,
             "score": round(W_IMPORTANCE * imp + W_FIT * fit + W_SHAPE * shape, 3)}
 
@@ -180,22 +256,31 @@ def plan_story(grid: WordGrid, moments_result: Dict, envs, pause_targets, target
     ids = [m["id"] for m in moments]
     durs = {m["id"]: duration(grid, moments, [m["id"]], envs, pause_targets) for m in moments}
     full = duration(grid, moments, ids, envs, pause_targets)
-    files = sorted({m["source_file"] for m in moments})
+    base = story_order(moments, moments_result.get("section_order", []))
+    for w in base["warnings"]:
+        logger.warning(f"[STORYPLAN] {w}")
+    base_reason = (f"Intro, then {' -> '.join(base['sections']) or 'the body'}, then outro. Section order: "
+                   f"{moments_result.get('section_order_reason') or 'listing order'}")
     table = "\n".join(
-        f"{m['id']} | clip {files.index(m['source_file']) + 1} at {m['start']:.1f}s | {m['function']} | importance "
-        f"{m['importance']} | needs {','.join(m['depends_on']) or '-'} | {durs[m['id']]:.1f}s | {m['summary']}" for m in moments)
+        f"{m['id']} | clip {m.get('clip', '?')} at {m['start']:.1f}s | {m.get('role', 'body')} | section "
+        f"{m.get('section') or '-'} | {m['function']} | importance {m['importance']} | needs "
+        f"{','.join(m['depends_on']) or '-'} | {durs[m['id']]:.1f}s | {m['summary']}" for m in moments)
     user = (f"Synopsis: {moments_result['synopsis']}\nCreator goal: {moments_result['creator_goal']}\n"
             f"Full edit: {full:.1f}s. Target duration: {f'{target:.0f}s' if target else 'none (keep everything)'}.\n\n"
-            f"Moments (raw order):\n{table}")
-    raw, usage = _call(user)
+            f"Moments (listing order):\n{table}\n\nStory order: {' '.join(base['order'])}")
+    try:
+        raw, usage = _call(user)
+    except Exception as e:                                 # the variants are optional; story_order is not
+        logger.warning(f"[STORYPLAN] variant plans failed, story order only: {e}")
+        raw, usage = [], {"model": MODEL, "input_tokens": 0, "output_tokens": 0, "cached": False, "error": str(e)}
     plans = []
-    for p in raw:
-        order, notes = repair(p["order"], moments, durs, target, full)
+    for p in [{"strategy": "story_order", "reasoning": base_reason, "order": base["order"], "notes": base["notes"]}] + raw:
+        order, notes = repair(p["order"], moments, durs, target, full, base["order"])
         if not order:
             continue
         d = duration(grid, moments, order, envs, pause_targets)
-        plans.append({"strategy": p["strategy"], "reasoning": p["reasoning"], "order": order, "repairs": notes,
-                      "duration_sec": d, **score(order, moments, d, target)})
+        plans.append({"strategy": p["strategy"], "reasoning": p["reasoning"], "order": order,
+                      "repairs": p.get("notes", []) + notes, "duration_sec": d, **score(order, moments, d, target)})
     if not plans:                                          # the model gave nothing usable: raw order
         d = duration(grid, moments, ids, envs, pause_targets)
         plans.append({"strategy": "raw_order", "reasoning": "fallback: no usable candidate", "order": ids,
@@ -203,7 +288,7 @@ def plan_story(grid: WordGrid, moments_result: Dict, envs, pause_targets, target
         logger.warning("[STORYPLAN] no usable candidate plan; using the raw order")
     plans.sort(key=lambda p: -p["score"])
     for p in plans:
-        logger.info(f"[STORYPLAN] {p['strategy']}: {len(p['order'])}/{len(moments)} moments, {p['duration_sec']:.1f}s "
-                    f"(target {target}), score {p['score']} {p['repairs'] or ''}")
-    return {"best": plans[0], "plans": plans, "full_sec": full, "target_sec": target,
+        logger.info(f"[STORYPLAN] {p['strategy']}: {' '.join(p['order'])} ({len(p['order'])}/{len(moments)} moments), "
+                    f"{p['duration_sec']:.1f}s (target {target}), score {p['score']} shape {p['shape']} {p['repairs'] or ''}")
+    return {"best": plans[0], "plans": plans, "full_sec": full, "target_sec": target, "warnings": base["warnings"],
             "stats": {**usage, "calls": 1}, "prompt_version": PROMPT_VERSION}

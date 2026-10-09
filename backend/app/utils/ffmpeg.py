@@ -598,3 +598,28 @@ def media_durations(path: str) -> Dict[str, float]:
     pcm = subprocess.run([get_ffmpeg_path(), "-v", "error", "-i", path, "-map", "0:a:0", "-ac", "1", "-ar", "16000",
                           "-f", "s16le", "-"], check=True, capture_output=True).stdout
     return {"video": float(json.loads(out)["streams"][0]["duration"]), "audio": len(pcm) / 2 / 16000}
+
+
+def parse_recording_time(tags: Dict) -> Optional[str]:
+    """ISO 8601 recording time from container tags: the QuickTime creation date (local time with its
+    UTC offset) first, else creation_time (UTC). None when absent or implausible (a camera clock never
+    set). Never guessed from the filename: messaging apps strip these tags and name files by save time."""
+    from datetime import datetime
+    for key in ("com.apple.quicktime.creationdate", "creation_time"):
+        try:
+            t = datetime.fromisoformat(str(tags[key]).strip())
+        except (KeyError, ValueError):
+            continue
+        if t.tzinfo is not None and t.year >= 2010:
+            return t.isoformat()
+    return None
+
+
+def recording_time(path: str) -> Optional[str]:
+    """When the clip was recorded (see parse_recording_time), or None."""
+    out = subprocess.run([get_ffprobe_path(), "-v", "error", "-show_entries", "format_tags", "-of", "json", path],
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        logger.warning(f"recording time: ffprobe failed for {path}: {out.stderr.strip()[:200]}")
+        return None
+    return parse_recording_time(json.loads(out.stdout or "{}").get("format", {}).get("tags", {}))
