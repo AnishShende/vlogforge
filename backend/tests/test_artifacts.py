@@ -65,11 +65,15 @@ def test_edit_view_maps_kept_words_to_output_time():
     artifacts.save_job("j", "grid", {"words": words})
     artifacts.save_job("j", "files", [{"filename": "a.mov", "path": "a.mov", "audio_path": "a.wav"}])
     artifacts.save_job("j", "cleanup", [{"word_start": "w1", "word_end": "w1", "label": "remove", "reason": "retake"}])
-    seg = lambda ids, a, b: {"word_ids": ids, "src_in": a, "src_out": b}
+    seg = lambda ids, a, b: {"source_file": "a.mov", "word_ids": ids, "src_in": a, "src_out": b, "reasons": ["m1"]}
     artifacts.save_job("j", "timeline", {"segments": [seg(["w0"], 0.9, 1.5), seg(["w2"], 2.9, 3.5)], "duration_sec": 1.2})
     view = load_job_edit("j")
     assert [w["id"] for w in view["words"]] == ["w0", "w1", "w2"]
     assert view["word_out"] == {"w0": 0.1, "w2": 0.7}          # 0.6 s first segment, then 0.1 s into the second
+    assert [(s["rec_in"], s["rec_out"], s["src_in"], s["moments"]) for s in view["segments"]] == [
+        (0.0, 0.6, 0.9, []), (0.6, 1.2, 2.9, [])]                # no moments artifact
+    artifacts.save_job("j", "moments", {"moments": [{"id": "m7", "function": "hook", "summary": "Opens", "word_ids": ["w2"]}]})
+    assert [s["moments"] for s in load_job_edit("j")["segments"]] == [[], [{"id": "m7", "function": "hook", "summary": "Opens"}]]
     assert view["ranges"][0]["reason"] == "retake" and view["files"] == ["a.mov"]
     assert load_job_edit("missing") is None
 

@@ -12,6 +12,9 @@ Candidates (local only, user decision 2026-10-05):
   H1 smallest.ai Pulse Pro (English-only), its own word timestamps      [hosted]
   H1a H1 text, re-timed by our WhisperX forced alignment                [hosted]
   H2 smallest.ai Pulse, per-clip language (manifest `asr_language`)    [hosted]
+  F_turbo / F_large  CrisperWhisper 2.0 (turbo / large), precomputed in its own venv by
+     eval/external/crisperwhisper_runner.py -> eval-set/_work/asr/F_<model>.json
+     [evaluation only: weights under Nyra Health Non-Commercial Research License]
 Hosted candidates upload the clip audio (user OK 2026-10-05, key SMALLEST_API_KEY).
 
 Scored per clip: gold speech without words (primary), boundary error, flags,
@@ -55,7 +58,21 @@ CANDIDATES = {
     "H1": dict(api="smallest", model="pulse-pro", decode={}),
     "H1a": dict(api="smallest", model="pulse-pro", decode={}, realign=True),
     "H2": dict(api="smallest", model="pulse", decode={}),
+    "F_turbo": dict(file="F_turbo", model="crisperwhisper2.0-turbo", decode={}),
+    "F_large": dict(file="F_large", model="crisperwhisper2.0-large", decode={}),
 }
+ASR_WORK = os.path.join(EVAL_SET_DIR, "_work", "asr")
+
+
+def _precomputed(wav: str, cand: dict, run_idx: int) -> List[Dict]:
+    """Words from an external runner's JSON, matched by wav file name."""
+    data = json.load(open(os.path.join(ASR_WORK, cand["file"] + ".json")))["results"]
+    runs = next((v for k, v in data.items() if os.path.basename(k) == os.path.basename(wav)), None)
+    if runs is None:
+        raise RuntimeError(f"{cand['file']}: no precomputed transcript for {os.path.basename(wav)}")
+    r = runs[run_idx % len(runs)]
+    cand["_runtime"] = cand.get("_runtime", 0.0) + r["runtime_sec"]
+    return r["words"]
 SMALLEST_URL = "https://api.smallest.ai/waves/v1/stt/"
 _models: Dict[str, object] = {}
 
@@ -105,8 +122,10 @@ def _segments_from_words(words: List[Dict], gap: float = 0.5) -> List[Dict]:
     return segs
 
 
-def transcribe(wav: str, cand: dict, language: str = "en") -> List[Dict]:
+def transcribe(wav: str, cand: dict, language: str = "en", run_idx: int = 0) -> List[Dict]:
     """Whisper pass + WhisperX forced alignment (word grid semantics: conf kept, untimed interpolated)."""
+    if cand.get("file"):
+        return _precomputed(wav, cand, run_idx)
     if cand.get("api") == "smallest":
         words = _smallest(wav, cand, language)
         if not cand.get("realign"):
@@ -150,16 +169,17 @@ def recover(wav: str, audio, env, transcript: List[Dict], cand: dict) -> List[Di
     return out
 
 
-def run_candidate(name: str, clip_id: str, envs: dict, audios: dict, language: str = "en") -> dict:
+def run_candidate(name: str, clip_id: str, envs: dict, audios: dict, language: str = "en", run_idx: int = 0) -> dict:
     cand = CANDIDATES[name]
+    cand.pop("_runtime", None)
     t0 = time.time()
     transcript = []
     for source_file, wav in clip_audio(clip_id).items():
-        tr = transcribe(wav, cand, language)
+        tr = transcribe(wav, cand, language, run_idx)
         if cand.get("recover"):
             tr = recover(wav, audios[source_file], envs[source_file], tr, cand)
         transcript += [{**t, "video_file": source_file} for t in tr]
-    runtime = time.time() - t0
+    runtime = cand.pop("_runtime", None) if cand.get("file") else time.time() - t0   # external: runner's own timing
     grid = build_word_grid(transcript, asr={"candidate": name, **{k: v for k, v in cand.items() if k != "decode"},
                                             "decode": {k: v for k, v in cand["decode"].items() if k != "initial_prompt"}})
     grid = check_word_grid(grid, envs)
@@ -181,7 +201,7 @@ def main():
     ap.add_argument("--repeat", type=int, default=2, help="runs per candidate (determinism)")
     a = ap.parse_args()
     settings.enable_word_grid = True              # aligner keeps conf + interpolates untimed words
-    cands = a.cand or [c for c in sorted(CANDIDATES) if "api" not in CANDIDATES[c]]   # hosted: opt-in
+    cands = a.cand or [c for c in sorted(CANDIDATES) if not ({"api", "file"} & set(CANDIDATES[c]))]   # hosted/external: opt-in
     entries = [c for c in load_manifest()["clips"] if not a.clip or c["clip_id"] in a.clip]
     clips = [c["clip_id"] for c in entries]
     langs = {c["clip_id"]: c.get("asr_language", "en") for c in entries}
@@ -194,7 +214,7 @@ def main():
         audios = {s.file: load_audio(os.path.join(REPO_ROOT, s.path)) for s in gold.sources}
         envs = {f: envelope(x) for f, x in audios.items()}
         for name in cands:
-            runs = [run_candidate(name, clip_id, envs, audios, langs[clip_id]) for _ in range(a.repeat)]
+            runs = [run_candidate(name, clip_id, envs, audios, langs[clip_id], i) for i in range(a.repeat)]
             r = runs[0]
             r["deterministic"] = all(x["word_texts"] == r["word_texts"] for x in runs[1:]) if a.repeat > 1 else None
             r["runtime_sec_all"] = [x["runtime_sec"] for x in runs]

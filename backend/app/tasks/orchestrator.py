@@ -534,6 +534,8 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
                     logger.warning(f"[MOMENTS] job {job_id}: moment table not built: {e}")
         else:
             # ---- Legacy path: EDL reasoning + assembly ----
+            from app.tasks.publish_copy import schedule_background
+            schedule_background(job_id)             # export panel post copy, once the render settles
 
             # ---- Stage 6: EDL Generation ----
             check_cancelled()
@@ -786,6 +788,8 @@ def run_recompile_sync(job_id: str, plan: Dict, main_loop: asyncio.AbstractEvent
         logger.warning(f"[RECOMPILE] job {job_id}: story refresh failed: {e}")
 
 
+    from app.tasks.publish_copy import schedule_background
+    schedule_background(job_id)            # post copy for the new render (after the refreshed moments)
 async def start_recompile(job_id: str, plan: Dict):
     """Spawn the re-compile in a background worker thread."""
     main_loop = asyncio.get_running_loop()

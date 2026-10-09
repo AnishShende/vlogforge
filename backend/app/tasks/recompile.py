@@ -48,12 +48,20 @@ def load_job_edit(job_id: str) -> Optional[Dict]:
     grid = WordGrid(**grid_d)
     timeline_d = artifacts.load_job(job_id, "timeline")
     word_out: Dict[str, float] = {}
+    segments: List[Dict] = []                     # the EDL: output segments in play order
     if timeline_d:
         by_id, t = grid.by_id(), 0.0
+        moments = (artifacts.load_job(job_id, "moments") or {}).get("moments", [])
+        moment_words = [(m, set(m["word_ids"])) for m in moments]
         for s in timeline_d["segments"]:          # output time = segment's output offset + offset in source
             for wid in s["word_ids"]:
                 word_out[wid] = round(t + by_id[wid].start - s["src_in"], 3)
-            t += round((s["src_out"] - s["src_in"]) * FPS) / FPS
+            dur = round((s["src_out"] - s["src_in"]) * FPS) / FPS
+            segments.append({"source_file": s["source_file"], "src_in": round(s["src_in"], 3), "src_out": round(s["src_out"], 3),
+                             "rec_in": round(t, 3), "rec_out": round(t + dur, 3), "word_ids": s["word_ids"],
+                             "moments": [{k: m[k] for k in ("id", "function", "summary")}   # by shared words:
+                                         for m, ids in moment_words if ids & set(s["word_ids"])]})  # ids change on refresh
+            t += dur
     return {
         "job_id": job_id,
         "files": [f["filename"] for f in files],
@@ -62,6 +70,7 @@ def load_job_edit(job_id: str) -> Optional[Dict]:
         "ranges": artifacts.load_job(job_id, "cleanup") or [],
         "plan": artifacts.load_job(job_id, "plan"),
         "word_out": word_out,
+        "segments": segments,
         "duration_sec": timeline_d["duration_sec"] if timeline_d else None,
         "validation": artifacts.load_job(job_id, "validation"),
         "story": _story_view(job_id),

@@ -4,7 +4,7 @@ import subprocess
 import json
 import shutil
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 
 logger = logging.getLogger("VlogForge.FFmpeg")
 
@@ -498,8 +498,12 @@ def assemble_single_pass(edl, file_map, output_path, crossfade_duration=0.075):
 # ---------------------------------------------------------------------------
 
 RENDER_SR = 48000
-_RENDER_SCALE = ("scale=1920:1080:force_original_aspect_ratio=decrease,"
-                 "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1")
+RENDER_SIZE = (1920, 1080)
+
+
+def _render_scale(w: int, h: int) -> str:
+    """Fit the whole frame inside w x h, centred, black bars where the shapes differ."""
+    return f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1"
 _LOUDNORM = "loudnorm=I=-14:TP=-1.5:LRA=11"
 
 
@@ -547,13 +551,15 @@ def _measure_loudness(cmd_inputs: List[str], audio_graph: List[str]) -> Dict:
 
 
 def render_compiled(segments: List[Dict], file_map: Dict[str, str], output_path: str, fps: int = 30,
-                    join_fade: float = 0.015, head_fade: float = 0.0, tail_fade: float = 0.0) -> Dict:
+                    join_fade: float = 0.015, head_fade: float = 0.0, tail_fade: float = 0.0,
+                    size: Tuple[int, int] = RENDER_SIZE) -> Dict:
     """Render compiled segments [{source_file, src_in, src_out}] in one pass.
 
     Video and audio of every segment have the same exact length (whole frames; the compiler
     snaps segment lengths), so A/V stays in sync across any number of cuts. Joins get short
     non-overlapping audio fades; loudness is normalised once over the whole output (two-pass
-    loudnorm, linear gain), not per clip. Returns {"loudness": measured, "duration_sec": ...}.
+    loudnorm, linear gain), not per clip. size: output frame (w, h), each clip fitted with black bars.
+    Returns {"loudness": measured, "duration_sec": ...}.
     Raises on failure (fail loud; no fallback path).
     """
     if not segments:
@@ -569,7 +575,7 @@ def render_compiled(segments: List[Dict], file_map: Dict[str, str], output_path:
     for i, s in enumerate(segments):
         frames = round((s["src_out"] - s["src_in"]) * fps)
         total += frames / fps
-        video.append(f"[{i}:v]setpts=PTS-STARTPTS,fps={fps},{_RENDER_SCALE},tpad=stop_mode=clone:stop_duration=0.5,"
+        video.append(f"[{i}:v]setpts=PTS-STARTPTS,fps={fps},{_render_scale(*size)},tpad=stop_mode=clone:stop_duration=0.5,"
                      f"trim=end_frame={frames},setpts=PTS-STARTPTS[v{i}]")
     vins = "".join(f"[v{i}]" for i in range(len(segments)))
     video.append(f"{vins}concat=n={len(segments)}:v=1:a=0,fade=in:st=0:d=0.5,"
@@ -578,7 +584,7 @@ def render_compiled(segments: List[Dict], file_map: Dict[str, str], output_path:
     cmd = [get_ffmpeg_path(), "-y", *inputs, "-filter_complex", ";".join(graph),
            "-map", "[vout]", "-map", "[aout]", "-r", str(fps), "-c:v", get_hw_encoder(), "-pix_fmt", "yuv420p",
            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", output_path]
-    logger.info(f"Compiled render: {len(segments)} segments -> {output_path} ({total:.2f}s), "
+    logger.info(f"Compiled render: {len(segments)} segments -> {output_path} ({total:.2f}s, {size[0]}x{size[1]}), "
                 f"input loudness {measured['input_i']} LUFS")
     run_ffmpeg_with_gpu_fallback(cmd)
     return {"loudness": measured, "duration_sec": round(total, 6)}

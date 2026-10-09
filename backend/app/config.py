@@ -78,6 +78,8 @@ class Settings(BaseSettings):
     enable_edit_passes: bool = False         # Phase 6.5: LLM edit passes replace the JEV cleanup (needs the compiler flag)
     enable_moments: bool = False             # Phase 8: build the moment table (story beats) after the edit is saved
     enable_story_plan: bool = False          # Phase 9: moments -> story plan (order + target duration) before the render
+    enable_background_post_copy: bool = True # write the export panel's post copy after each render (word-grid jobs)
+    post_copy_delay_sec: float = 45.0        # ... this long after the LAST render, so a burst of re-compiles costs one call
                                              # -> single-pass render, replacing EDL + assembly. Requires
                                              # enable_word_grid. Speech only: B-roll and target duration are
                                              # ignored (job warnings say so).
