@@ -57,3 +57,6 @@ artifacts/
 /*.md
 !/README.md
 /*.excalidraw
+
+# Local AI-agent notes (describe the pre-MVP module layout)
+.agents/
