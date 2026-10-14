@@ -113,19 +113,32 @@ class PriorityRateLimiter:
                         logged = True
                     self.cond.wait()
 
-_rate_limiter = PriorityRateLimiter(settings.gemini_rpm)
+_rate_limiter = PriorityRateLimiter(settings.gemini_rpm)          # Gemini models
+_claude_limiter = PriorityRateLimiter(settings.claude_rpm)         # Claude models (the legacy wrapper's default now)
+
+_claude_client = None
+
+def claude_client():
+    """One shared Anthropic client for every call site: connections are reused, and a request
+    that hangs (dropped network) fails after claude_timeout_sec; the SDK retries twice."""
+    global _claude_client
+    if _claude_client is None:
+        import anthropic
+        _claude_client = anthropic.Anthropic(api_key=settings.claude_api_key,
+                                             timeout=settings.claude_timeout_sec, max_retries=2)
+    return _claude_client
 
 @with_gemini_retry(max_retries=5)
 def safe_generate_content(*args, priority: int = 1, call_name: str = "LLM Call", **kwargs):
     if not init_gemini():
         raise RuntimeError("Gemini not initialized")
         
-    _rate_limiter.wait(priority, call_name)
-    
     # Extract model name
     model = kwargs.get("model")
     if not model and len(args) > 0:
         model = args[0]
+
+    (_claude_limiter if str(model).startswith("claude") else _rate_limiter).wait(priority, call_name)
         
     # Priority list of models to fall back to if daily quota is exceeded or model is missing
     fallbacks = [
@@ -199,8 +212,8 @@ def safe_generate_content(*args, priority: int = 1, call_name: str = "LLM Call",
                 
         try:
             if current_model.startswith("claude"):
-                import anthropic, base64, io
-                claude_client = anthropic.Anthropic(api_key=settings.claude_api_key)
+                import base64, io
+                client = claude_client()
                 
                 # Extract text and images
                 claude_content = []
@@ -236,7 +249,7 @@ def safe_generate_content(*args, priority: int = 1, call_name: str = "LLM Call",
                 if schema:
                     # Enforce JSON Schema via tool calling
                     schema_dict = schema.model_json_schema()
-                    msg = claude_client.messages.create(
+                    msg = client.messages.create(
                         model=current_model,
                         max_tokens=4096,
                         tools=[{
@@ -247,11 +260,11 @@ def safe_generate_content(*args, priority: int = 1, call_name: str = "LLM Call",
                         tool_choice={"type": "auto"},
                         messages=[{"role": "user", "content": claude_content}]
                     )
-                    logger.info(f"RAW Claude Message Object: {msg}")
+                    logger.debug(f"RAW Claude Message Object: {msg}")
                     tool_call = next((b for b in msg.content if b.type == "tool_use"), None)
                     response_text = json.dumps(tool_call.input) if tool_call else "{}"
                 else:
-                    msg = claude_client.messages.create(
+                    msg = client.messages.create(
                         model=current_model,
                         max_tokens=4096,
                         messages=[{"role": "user", "content": claude_content}]
@@ -363,7 +376,7 @@ def describe_keyframe(image_path: str, context_notes: str = "", classify_content
             return ("\n".join(description_lines).strip(), has_meaningful)
         return text
     except Exception as e:
-        logger.error(f"Gemini multimodal keyframe description failed: {e}")
+        logger.error(f"Keyframe description failed ({settings.perception_model}): {e}")
         return ("Visual description unavailable due to API error.", False) if classify_content else "Visual description unavailable due to API error."
 
 def describe_keyframes_batch(items: List[Dict], context_notes: str = "") -> Dict[str, str]:

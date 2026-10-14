@@ -35,6 +35,7 @@ import anthropic
 from app.config import settings
 from app.models import EditPlan, EditSegment, WordGrid
 from app.utils import artifacts
+from app.utils.llm import claude_client
 
 logger = logging.getLogger("VlogForge.EditPasses")
 
@@ -334,7 +335,7 @@ def _call(model: str, system: str, user: str, categories: List[str], extra: Opti
     if hit is not None:
         return hit["cuts"], {**hit["usage"], "cached": True}
     global _client
-    _client = _client or anthropic.Anthropic(api_key=settings.claude_api_key)
+    _client = _client or claude_client()
     fmt = {"format": {"type": "json_schema", "schema": _schema(categories, extra)}}
     if model == LARGE_MODEL:     # Sonnet 5.5: adaptive thinking (default), server-side refusal fallback
         r = _client.beta.messages.create(model=model, max_tokens=16000, system=system,

@@ -49,7 +49,9 @@ class Settings(BaseSettings):
     # Model tiering
     perception_model: str = "claude-haiku-4-5-20251001"   # Cheap model for Pass 1 classification
     reasoning_model: str = "claude-sonnet-5-5"         # Frontier model for Pass 2 reasoning (Phase 1+)
-    gemini_rpm: int = 14                          # Free tier RPM limit
+    gemini_rpm: int = 14                          # Free tier RPM limit (Gemini models only)
+    claude_rpm: int = 50                          # client-side pacing of legacy-wrapper Claude calls; 429s are retried by the SDK
+    claude_timeout_sec: float = 120.0             # per request: a dropped connection fails fast instead of the SDK's 600 s
 
     # M4: Long-Footage Scaling — controls for batch/chunk processing
     # Classification (Workstream 1)
@@ -78,6 +80,7 @@ class Settings(BaseSettings):
     enable_edit_passes: bool = False         # Phase 6.5: LLM edit passes replace the JEV cleanup (needs the compiler flag)
     enable_moments: bool = False             # Phase 8: build the moment table (story beats) after the edit is saved
     enable_story_plan: bool = False          # Phase 9: moments -> story plan (order + target duration) before the render
+    enable_broll: bool = False               # Phase 10: B-roll over voice-over (footage categories, story-aware shots)
     enable_background_post_copy: bool = True # write the export panel's post copy after each render (word-grid jobs)
     post_copy_delay_sec: float = 45.0        # ... this long after the LAST render, so a burst of re-compiles costs one call
                                              # -> single-pass render, replacing EDL + assembly. Requires

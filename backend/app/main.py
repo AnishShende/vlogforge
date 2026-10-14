@@ -267,9 +267,11 @@ def get_raw_video(job_id: str, filename: str):
     raw_video_path = os.path.join(settings.upload_dir, job_id, "raw", filename)
     if not os.path.exists(raw_video_path):
         raise HTTPException(status_code=404, detail="Raw video file not found.")
+    import mimetypes                           # voice-over uploads are audio (.m4a / .mp3 / .wav / .aac)
     return FileResponse(
         path=raw_video_path,
-        media_type="video/mp4",
+        media_type={".m4a": "audio/mp4", ".aac": "audio/aac", ".wav": "audio/wav", ".mp3": "audio/mpeg"}.get(
+            os.path.splitext(filename)[1].lower()) or mimetypes.guess_type(filename)[0] or "video/mp4",
         filename=filename
     )
 
@@ -406,38 +408,84 @@ def export_job_edit(job_id: str, fmt: str, name: Optional[str] = None):
     return Response(content=body, media_type="application/xml" if fmt == "fcpxml" else "text/plain",
                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
+def _caption_style(captions: Optional[str]) -> Optional[str]:
+    """Query value -> caption preset key (None = no captions); 400 for an unknown preset."""
+    from app.tasks.subtitles import STYLES
+    if not captions or captions == "off":
+        return None
+    if captions not in STYLES:
+        raise HTTPException(status_code=400, detail=f"Unknown caption style: {captions}")
+    return captions
+
+@app.get("/api/jobs/{job_id}/captions")
+def get_job_captions(job_id: str):
+    """Caption blocks of the last render (output clock, the ones burned in on export) and the style presets,
+    for the editor's live caption overlay."""
+    from app.tasks import subtitles
+    cues = subtitles.job_cues(job_id)
+    if cues is None:
+        raise HTTPException(status_code=404, detail="No stored render with a word grid for this job")
+    return {"block_sec": subtitles.BLOCK_SEC, "cues": cues, "styles": subtitles.STYLES,
+            "portrait_margin_v": subtitles.PORTRAIT_MARGIN_V, "side_margin": subtitles.SIDE_MARGIN,
+            "scale_range": subtitles.SCALE_RANGE, "placement": subtitles.job_placement(job_id)}
+
+@app.put("/api/jobs/{job_id}/captions/placement")
+def put_caption_placement(job_id: str, placement: dict):
+    """Where captions sit and how big (moved / resized in the editor): {scale, x, y}; x / y null = the
+    preset's place. Applies to the live overlay and to every captioned export (those made before go stale)."""
+    from app.tasks import subtitles
+    if subtitles.job_cues(job_id) is None:
+        raise HTTPException(status_code=404, detail="No stored render with a word grid for this job")
+    try:
+        saved = subtitles.save_placement(job_id, placement)
+    except (TypeError, ValueError, KeyError) as e:
+        raise HTTPException(status_code=400, detail=f"Bad placement: {e}")
+    interaction_logger.log_interaction("caption_placement", {"job_id": job_id, **saved})
+    return saved
+
 @app.get("/api/jobs/{job_id}/layouts")
-def get_job_layouts(job_id: str):
-    """Export layouts (16:9, 9:16, 1:1, 4:5) of the last render, each with its status."""
+def get_job_layouts(job_id: str, captions: Optional[str] = None):
+    """Export layouts (16:9, 9:16, 1:1, 4:5) of the last render, each with its status; with ?captions=<preset>,
+    the statuses of the files with burned-in captions in that preset."""
     from app.tasks.layouts import list_layouts, source_dims
+    from app.tasks.subtitles import BLOCK_SEC, STYLES
     from app.utils.ffmpeg import RENDER_SIZE
-    rows = list_layouts(job_id)
+    try:
+        rows = list_layouts(job_id, _caption_style(captions))
+    except ValueError as e:                       # e.g. captions asked for a job without a word grid
+        raise HTTPException(status_code=400, detail=str(e))
     if rows is None:
         raise HTTPException(status_code=404, detail="No stored render for this job")
-    return {"layouts": rows, "main_size": list(RENDER_SIZE), "sources": source_dims(job_id)}
+    return {"layouts": rows, "main_size": list(RENDER_SIZE), "sources": source_dims(job_id),
+            "caption_styles": [{"key": k, "name": v["name"], "description": v["description"]} for k, v in STYLES.items()],
+            "caption_block_sec": BLOCK_SEC}
 
 @app.post("/api/jobs/{job_id}/layouts/{key}/render")
-def render_job_layout(job_id: str, key: str):
-    """Render the last render's edit in another frame shape (background; poll GET .../layouts)."""
+def render_job_layout(job_id: str, key: str, captions: Optional[str] = None):
+    """Render the last render's edit in another frame shape, or any shape with burned-in captions
+    (?captions=<preset>) (background; poll GET .../layouts)."""
     from app.tasks.layouts import LAYOUTS, MAIN, list_layouts, start_render
-    if key not in LAYOUTS or key == MAIN:
+    style = _caption_style(captions)
+    if key not in LAYOUTS or (key == MAIN and not style):
         raise HTTPException(status_code=400, detail=f"Unknown or main layout: {key}")
     if list_layouts(job_id) is None:
         raise HTTPException(status_code=404, detail="No stored render for this job")
-    started = start_render(job_id, key)
-    interaction_logger.log_interaction("render_layout", {"job_id": job_id, "layout": key, "started": started})
+    started = start_render(job_id, key, style)
+    interaction_logger.log_interaction("render_layout", {"job_id": job_id, "layout": key, "captions": style, "started": started})
     return {"status": "rendering", "started": started}
 
 @app.get("/api/jobs/{job_id}/layouts/{key}/download")
-def download_job_layout(job_id: str, key: str):
-    """Download a rendered layout MP4."""
+def download_job_layout(job_id: str, key: str, captions: Optional[str] = None):
+    """Download a rendered layout MP4 (?captions=<preset>: the captioned file)."""
     from app.tasks.layouts import LAYOUTS, layout_path
     if key not in LAYOUTS:
         raise HTTPException(status_code=400, detail=f"Unknown layout: {key}")
-    path = layout_path(job_id, key)
+    style = _caption_style(captions)
+    path = layout_path(job_id, key, style)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="This layout has not been rendered yet.")
-    return FileResponse(path=path, media_type="video/mp4", filename=f"vlogforge_{job_id[:8]}_{LAYOUTS[key]['ratio'].replace(':', 'x')}.mp4")
+    return FileResponse(path=path, media_type="video/mp4",
+                        filename=f"vlogforge_{job_id[:8]}_{LAYOUTS[key]['ratio'].replace(':', 'x')}{'_captions-' + style if style else ''}.mp4")
 
 @app.get("/api/jobs/{job_id}/publish")
 def get_publish_copy(job_id: str, format: str = "auto", regenerate: bool = False):

@@ -244,7 +244,7 @@ export default function App() {
     setContextText('');
     setJobId(null);
     setDownloadUrl(null);
-    setTargetDuration(10.0);
+    setTargetDuration(600);              // seconds; the "10 Mins" default (was 10 s, not an option)
     setVlogGenre('default');
     setQualityThreshold(0.20);
   };
@@ -351,7 +351,7 @@ export default function App() {
     setContextText('');
     setJobId(null);
     setDownloadUrl(null);
-    setTargetDuration(10.0);
+    setTargetDuration(600);              // seconds; the "10 Mins" default (was 10 s, not an option)
     setVlogGenre('default');
     setQualityThreshold(0.20);
   };

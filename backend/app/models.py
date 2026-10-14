@@ -29,6 +29,7 @@ class VideoFileInfo(BaseModel):
     duration: float = 0.0
     size_bytes: int = 0
     audio_path: Optional[str] = None
+    audio_only: bool = False          # voice-over recording without picture (Phase 10)
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +243,7 @@ class EditPlan(BaseModel):
 CUT_FLAG_TIGHT = "tight"            # no pause between the words: cut at the quietest point between their edges
 CUT_FLAG_LONG_TAIL = "long_tail"    # activity ran past the word edge longer than the search limit
 CUT_FLAG_FRAME_OFF = "frame_off"    # segment length could not be snapped to whole frames inside the window
-CUT_FLAG_IN_NOISE = "in_noise"      # dead-air cut placed in background noise (no words in the gap)
+CUT_FLAG_IN_NOISE = "in_noise"      # cut placed in background noise: no words there and no voice detected (water, wind, music)
 CUT_FLAG_VALLEY = "valley"          # activity next to the word was split at a deep dip (untranscribed sound beyond it)
 
 
@@ -282,6 +283,8 @@ class CompiledTimeline(BaseModel):
     duration_sec: float                                 # sum of whole-frame segment lengths
     grid_fingerprint: str = ""
     pause_targets: Optional[Dict[str, float]] = None    # S3 targets used (None = pause shortening off)
+    overlays: List[Dict] = []                           # Phase 10 B-roll pictures over the main picture, OUTPUT
+                                                        # clock: {source_file, src_in, src_out, rec_in, rec_out, ...}
 
 
 # ---------------------------------------------------------------------------

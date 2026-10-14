@@ -7,7 +7,8 @@ import { ZoomIn, ZoomOut, Maximize2, AlertTriangle } from 'lucide-react';
 // words (then ⌫ cuts it); drag a clip sideways to move it; drag a clip's edge to trim or extend it
 // by whole words (trim() decides the words). Pending edits show on the clips: cut words hatched,
 // restored words as +N at the edge. All of it applies on re-compile.
-// ctrl/cmd + wheel (or pinch) zooms; the view follows the playhead while it plays.
+// ctrl/cmd + wheel (or pinch) zooms; the view follows the playhead while it plays. tracksH sets the
+// height of V1 + A1 (the editor's resize handle above the timeline changes it).
 
 const FAMILY = [
   [['hook'], '#8B5CF6'],
@@ -32,7 +33,8 @@ const wavePath = (p) => {
 };
 
 export default function EditTimeline({ segments, order, wordsById, wordOut, currentTime, onSeek, onClipClick, onReorder, warnings, wave, selectedClip,
-  kept, added, trim, onTrim }) {
+  kept, added, trim, onTrim, tracksH = TRACKS_H }) {
+  const V_H = Math.round(tracksH * 0.6), A_H = tracksH - V_H;
   const scrollRef = useRef(null);
   const [pps, setPps] = useState(20);                  // pixels per second
   const [fit, setFit] = useState(true);
@@ -263,7 +265,7 @@ export default function EditTimeline({ segments, order, wordsById, wordOut, curr
                         {warnings[i] && <AlertTriangle size={10} style={{ color: 'var(--warning)', flexShrink: 0 }} />}
                         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}</span>
                       </div>
-                      <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginTop: 2 }}>“{text}”</div>
+                      <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', whiteSpace: V_H > 70 ? 'normal' : 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginTop: 2 }}>“{text}”</div>
                     </>}
                     {w > 16 && ['in', 'out'].map(side => (
                       <div key={side} className={`tl-handle ${side}`} title={side === 'in' ? 'Drag to trim or extend the start' : 'Drag to trim or extend the end'}
@@ -311,7 +313,8 @@ export default function EditTimeline({ segments, order, wordsById, wordOut, curr
   );
 }
 
-const RULER_H = 22, V_H = 56, A_H = 38;
+const RULER_H = 22;
+export const TRACKS_H = 94;                            // default V1 + A1 height
 const wrap = { minWidth: 0, background: 'var(--card-bg)', border: '1px solid var(--card-border)', borderRadius: 'var(--radius-lg)', padding: '0.6rem 0.75rem 0.4rem' };
 const header = { display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.4rem' };
 const title = { fontSize: '0.72rem', fontWeight: 600, letterSpacing: '0.06em', color: 'var(--text-muted)' };

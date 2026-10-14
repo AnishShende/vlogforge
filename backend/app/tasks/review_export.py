@@ -65,12 +65,12 @@ def _probe(path: str) -> Dict:
     tc = None
     for s in [info.get("format", {})] + info.get("streams", []):
         tc = tc or (s.get("tags") or {}).get("timecode")
-    if not video:
-        logger.warning(f"[EXPORT] {path}: no video stream found by ffprobe, assuming {w}x{h}")
+    if not video and not info.get("streams"):
+        logger.warning(f"[EXPORT] {path}: no streams found by ffprobe, assuming {w}x{h}")
     rate = video.get("r_frame_rate") or ""
     if not rate or rate.startswith("0/") or rate.endswith("/0"):
         rate = f"{FPS}/1"
-    return {"width": w, "height": h, "rate": rate,
+    return {"width": w, "height": h, "rate": rate, "has_video": bool(video),
             "duration": float(info.get("format", {}).get("duration") or 0), "timecode": tc}
 
 
@@ -101,7 +101,11 @@ def _events(job_id: str) -> Optional[Dict]:
         notes = [m["summary"] for m in moments if ids & set(m["word_ids"])]
         events.append({"file": s["source_file"], "src_in": round(s["src_in"] * FPS), "dur": dur, "rec_in": rec, "notes": notes})
         rec += dur
-    return {"events": events, "files": {f["filename"]: f["path"] for f in files}, "duration": rec}
+    overlays = [{"file": o["source_file"], "src_in": round(o["src_in"] * FPS), "rec_in": round(o["rec_in"] * FPS),
+                 "dur": round(o["rec_out"] * FPS) - round(o["rec_in"] * FPS), "caption": o.get("caption", "")}
+                for o in timeline.get("overlays") or []]
+    return {"events": events, "overlays": [o for o in overlays if o["dur"] > 0],
+            "files": {f["filename"]: f["path"] for f in files}, "duration": rec}
 
 
 def export_edl(job_id: str, title: str) -> Optional[str]:
@@ -119,6 +123,14 @@ def export_edl(job_id: str, title: str) -> Optional[str]:
         lines.append(f"* FROM CLIP NAME: {e['file']}")
         for note in e["notes"]:
             lines.append(f"* COMMENT: {note}")
+        lines.append("")
+    for n, o in enumerate(ev["overlays"], len(ev["events"]) + 1):     # B-roll: video only, over the sound above
+        reel = "".join(c for c in os.path.splitext(o["file"])[0].upper() if c.isalnum() or c == "_")[:8] or "BX"
+        src0 = _tc_frames(probes[o["file"]]) + o["src_in"]
+        rec0 = RECORD_START_SEC * FPS + o["rec_in"]
+        lines.append(f"{n:03d}  {reel:<8} V     C        {_tc(src0)} {_tc(src0 + o['dur'])} {_tc(rec0)} {_tc(rec0 + o['dur'])}")
+        lines.append(f"* FROM CLIP NAME: {o['file']}")
+        lines.append(f"* COMMENT: B-ROLL over voice-over: {o['caption'][:120]}")
         lines.append("")
     return "\n".join(lines)
 
@@ -145,16 +157,29 @@ def export_fcpxml(job_id: str, title: str) -> Optional[str]:
         tc0 = _tc_frames(p)
         start, dur = _t(tc0), _t(round(p["duration"] * FPS))
         url = "file://" + quote(os.path.abspath(ev["files"][f]))
+        video = f'hasVideo="1" format="f{k}" ' if p["has_video"] else 'hasVideo="0" '       # voice-over: audio only
         res.append(f'    <asset id="a{k}" name={quoteattr(os.path.splitext(f)[0])} start="{start}" duration="{dur}" '
-                   f'hasVideo="1" hasAudio="1" format="f{k}" audioSources="1" audioChannels="2" audioRate="48000">\n'
+                   f'{video}hasAudio="1" audioSources="1" audioChannels="2" audioRate="48000">\n'
                    f'      <media-rep kind="original-media" src={quoteattr(url)}/>\n    </asset>')
         asset_ids[f] = (f"a{k}", f"f{k}", tc0)
     clips = []
     for e in ev["events"]:
         aid, fid, tc0 = asset_ids[e["file"]]
         name = e["notes"][0] if e["notes"] else os.path.splitext(e["file"])[0]
-        clips.append(f'            <asset-clip ref="{aid}" name={quoteattr(name)} offset="{_t(e["rec_in"])}" '
-                     f'start="{_t(tc0 + e["src_in"])}" duration="{_t(e["dur"])}" format="{fid}" tcFormat="NDF"/>')
+        fmt = f' format="{fid}"' if probes[e["file"]]["has_video"] else ""
+        # B-roll starting inside this event: connected clips on lane 1, offset on this clip's own (source) clock,
+        # muted (the voice-over carries the sound)
+        conn = []
+        for o in ev["overlays"]:
+            if e["rec_in"] <= o["rec_in"] < e["rec_in"] + e["dur"]:
+                oid, ofid, otc0 = asset_ids[o["file"]]
+                conn.append(f'              <asset-clip ref="{oid}" lane="1" name={quoteattr("B-roll: " + o["caption"][:80])} '
+                            f'offset="{_t(tc0 + e["src_in"] + o["rec_in"] - e["rec_in"])}" start="{_t(otc0 + o["src_in"])}" '
+                            f'duration="{_t(o["dur"])}" format="{ofid}" tcFormat="NDF">\n'
+                            f'                <adjust-volume amount="-96dB"/>\n              </asset-clip>')
+        head = (f'            <asset-clip ref="{aid}" name={quoteattr(name)} offset="{_t(e["rec_in"])}" '
+                f'start="{_t(tc0 + e["src_in"])}" duration="{_t(e["dur"])}"{fmt} tcFormat="NDF"')
+        clips.append(head + ("/>" if not conn else ">\n" + "\n".join(conn) + "\n            </asset-clip>"))
     return "\n".join([
         '<?xml version="1.0" encoding="UTF-8"?>', "<!DOCTYPE fcpxml>", '<fcpxml version="1.9">', "  <resources>",
         *res, "  </resources>", "  <library>", '    <event name="VlogForge">', f"      <project name={quoteattr(title)}>",

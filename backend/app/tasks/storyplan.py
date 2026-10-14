@@ -28,6 +28,7 @@ from app.config import settings
 from app.models import EditPlan, EditSegment, WordGrid
 from app.tasks.compiler import FPS, compile_plan
 from app.utils import artifacts
+from app.utils.llm import claude_client
 
 logger = logging.getLogger("VlogForge.StoryPlan")
 
@@ -72,7 +73,7 @@ def _call(user: str) -> Tuple[List[Dict], Dict]:
     if hit is not None:
         return hit["plans"], {**hit["usage"], "cached": True}
     global _client
-    _client = _client or anthropic.Anthropic(api_key=settings.claude_api_key)
+    _client = _client or claude_client()
     r = _client.beta.messages.create(model=MODEL, max_tokens=16000, system=SYSTEM,
                                      messages=[{"role": "user", "content": user}],
                                      output_config={"effort": "medium", "format": {"type": "json_schema", "schema": _schema()}},

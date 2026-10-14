@@ -192,6 +192,16 @@ def speaker_pause_targets(grid: WordGrid, envs: Dict[str, Envelope]) -> Dict[str
     return out
 
 
+def _noise_flags(env: Envelope, t: float, flags: List[str]) -> List[str]:
+    """A word cut that lands on loud sound the voice detector does not hear as speech (water, wind, engine,
+    music under a clip) is a cut in background noise, not through speech: flag it in_noise so it is reported
+    (warning) instead of failing the job. A cut on detected voice stays unflagged and still fails validation."""
+    i = env.t2i(t)
+    if _active(env)[i] and not env.speech[i] and CUT_FLAG_IN_NOISE not in flags:
+        return flags + [CUT_FLAG_IN_NOISE]
+    return flags
+
+
 def cut_out(env: Envelope, word_end: float, next_start: Optional[float], file_end: float,
             max_pause: float = MAX_PAUSE_OUT_SEC, search_sec: float = TAIL_SEARCH_SEC) -> CutPoint:
     """Cut after a kept word; next_start is the following (unkept) word, None at file end."""
@@ -213,7 +223,7 @@ def cut_out(env: Envelope, word_end: float, next_start: Optional[float], file_en
         hi = max(lo, min(edge + max_pause, bound - margin))
     t = _quietest(env, lo, hi, prefer_late=False)
     return CutPoint(time=t, side="out", word_edge=word_end, activity_edge=edge, window=[lo, hi],
-                    level_db=_level(env, t), flags=flags)
+                    level_db=_level(env, t), flags=_noise_flags(env, t, flags))
 
 
 def cut_in(env: Envelope, word_start: float, prev_end: Optional[float], max_pause: float = MAX_PAUSE_IN_SEC,
@@ -237,7 +247,7 @@ def cut_in(env: Envelope, word_start: float, prev_end: Optional[float], max_paus
         lo = min(hi, max(edge - max_pause, bound + margin))
     t = _quietest(env, lo, hi, prefer_late=True)
     return CutPoint(time=t, side="in", word_edge=word_start, activity_edge=edge, window=[lo, hi],
-                    level_db=_level(env, t), flags=flags)
+                    level_db=_level(env, t), flags=_noise_flags(env, t, flags))
 
 
 def snap_to_frames(env: Envelope, c_in: CutPoint, c_out: CutPoint) -> None:
@@ -247,17 +257,23 @@ def snap_to_frames(env: Envelope, c_in: CutPoint, c_out: CutPoint) -> None:
     dur = c_out.time - c_in.time
     k = max(1, round(dur * FPS))
     act = _active(env)
+    file_end = len(env.speech) * HOP_SEC
+    # a cut at a file edge is not an edit (the clip simply starts / ends there), so it counts as quiet: moving
+    # it inward onto sound would cut through that sound (2026-10-12: short voice-over ending mid-music)
+    at_edge = lambda c: c.time <= 1e-3 or c.time >= file_end - 1e-3
     # a move may not put a cut that was on a quiet frame onto activity (Phase 3 validator caught this)
     ok = lambda c, t: (c.window[0] - 1e-9 <= t <= c.window[1] + 1e-9
-                       and (not act[env.t2i(t)] or bool(act[env.t2i(c.time)])))
+                       and (not act[env.t2i(t)] or (bool(act[env.t2i(c.time)]) and not at_edge(c))))
     for target in sorted({k, max(1, k - 1), k + 1}, key=lambda x: abs(x * frame - dur)):
         new_out = c_in.time + target * frame
         if ok(c_out, new_out):
             c_out.time, c_out.level_db = new_out, _level(env, new_out)
+            c_out.flags = _noise_flags(env, new_out, c_out.flags)
             return
         new_in = c_out.time - target * frame
         if ok(c_in, new_in):
             c_in.time, c_in.level_db = new_in, _level(env, new_in)
+            c_in.flags = _noise_flags(env, new_in, c_in.flags)
             return
     c_out.flags.append(CUT_FLAG_FRAME_OFF)
 
@@ -385,14 +401,17 @@ def render_timeline(timeline: CompiledTimeline, file_map: Dict[str, str], output
     from app.utils.ffmpeg import render_compiled
     return render_compiled([s.model_dump() for s in timeline.segments], file_map, output_path, fps=timeline.fps,
                            join_fade=timeline.join_fade_sec, head_fade=timeline.head_fade_sec,
-                           tail_fade=timeline.tail_fade_sec)
+                           tail_fade=timeline.tail_fade_sec, overlays=timeline.overlays)
 
 
 def compile_and_render(plan: EditPlan, grid: WordGrid, envs: Dict[str, Envelope], file_map: Dict[str, str],
-                       output_path: str, pauses: bool = True) -> Tuple[CompiledTimeline, Dict]:
+                       output_path: str, pauses: bool = True,
+                       overlay_planner=None) -> Tuple[CompiledTimeline, Dict]:
     """Plan -> cuts (S2, + S3 pause shortening unless pauses=False) -> post-condition checks ->
     render -> render checks. A failed structural check raises before rendering; the report
-    (info["validation"]) is attached either way it gets that far."""
+    (info["validation"]) is attached either way it gets that far. overlay_planner(timeline) -> (overlays,
+    report): Phase 10 B-roll over voice-over, planned on the compiled timeline before the render; a planner
+    error never fails the render (logged, report["error"])."""
     from app.tasks.validate import make_report, validate_render, validate_structure
     from app.utils.ffmpeg import media_durations
     targets = speaker_pause_targets(grid, envs) if pauses else None
@@ -402,7 +421,14 @@ def compile_and_render(plan: EditPlan, grid: WordGrid, envs: Dict[str, Envelope]
         report = make_report(checks)
         raise PlanError("compiled timeline failed validation:\n  " + "\n  ".join(
             f"{c.check} (segment {c.segment}): {c.detail}" for c in report.checks if c.status == "fail"))
-    info = {**render_timeline(timeline, file_map, output_path), "pause_targets": targets}
+    broll_report = None
+    if overlay_planner is not None:
+        try:
+            timeline.overlays, broll_report = overlay_planner(timeline)
+        except Exception as e:
+            logger.warning(f"[BROLL] overlay planning failed, rendering without B-roll: {e}", exc_info=True)
+            timeline.overlays, broll_report = [], {"error": str(e)[:300], "warnings": [f"B-roll planning failed: {e}"]}
+    info = {**render_timeline(timeline, file_map, output_path), "pause_targets": targets, "broll": broll_report}
     d = media_durations(output_path)
     info["validation"] = make_report(checks + validate_render(timeline, d["video"], d["audio"])).model_dump()
     return timeline, info

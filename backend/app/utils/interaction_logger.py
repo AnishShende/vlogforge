@@ -34,11 +34,12 @@ class InteractionLogger:
     def log_pipeline_completion(self, job_id: str, egt_data: Dict[str, Any], edl_data: List[Dict[str, Any]]):
         """Log the completion of a job, including pretty-printed EGT and EDL outputs."""
         try:
-            # EGT Summary
-            egt_summary = f"\n=== EGT (Editorial Ground Truth) SUMMARY for Job {job_id} ===\n"
+            # EGT Summary (word-grid jobs build no EGT)
+            egt_summary = "" if not egt_data else f"\n=== EGT (Editorial Ground Truth) SUMMARY for Job {job_id} ===\n"
             total_duration = egt_data.get("total_duration_sec", 0.0)
             segments = egt_data.get("segments", [])
-            egt_summary += f"Total Raw Duration: {total_duration:.2f}s | Segments: {len(segments)}\n"
+            if egt_data:
+                egt_summary += f"Total Raw Duration: {total_duration:.2f}s | Segments: {len(segments)}\n"
             
             for i, seg in enumerate(segments):
                 egt_summary += (

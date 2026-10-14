@@ -246,3 +246,32 @@ def test_untranscribed_burst_before_word_is_split_off_at_the_dip():
     assert 1.65 - 1e-9 <= seg.src_in <= 1.70 + 1e-9                 # in the dip: stray burst left out
     seg = compile_plan(_plan(g, (0, 0)), g, {"a.mov": env})[0]       # w0's cut out is a normal pause cut
     assert "valley" not in seg.cut_out.flags
+
+
+def test_a_cut_at_the_file_end_is_never_moved_inward_onto_sound():
+    # short voice-over memo: music under everything, speech up to the last moment (2026-10-12 job failure)
+    dur = 1.645
+    env = _env(dur, speech=[(0.25, 1.62)], loud=[(0.0, dur)])
+    grid = _grid([(0.30, 0.70), (0.80, 1.55)])
+    seg = compile_plan(_plan(grid, (0, 1)), grid, {"a.mov": env})[0]
+    end = len(env.speech) * HOP_SEC
+    act = env.speech | env.loud
+    out_t = seg.cut_out.time
+    assert out_t >= end - 1e-3 or not act[env.t2i(out_t)], f"out cut {out_t:.3f} moved onto sound"
+    in_t = seg.cut_in.time
+    assert in_t <= 1e-3 or not act[env.t2i(in_t)], f"in cut {in_t:.3f} on sound"
+
+
+def test_cut_in_loud_non_speech_sound_is_flagged_in_noise_but_cut_on_voice_is_not():
+    from app.models import CUT_FLAG_IN_NOISE
+    # whitewater clip: loud everywhere except a 40 ms dip after the last word; no voice detected there
+    env = _env(8.0, speech=[(0.10, 0.40), (0.75, 1.00)], loud=[(0.0, 1.43), (1.47, 8.0)])
+    grid = _grid([(0.14, 0.35), (0.79, 0.93)])
+    seg = compile_plan(_plan(grid, (0, 1)), grid, {"a.mov": env})[0]
+    act = env.speech | env.loud
+    if act[env.t2i(seg.cut_out.time)]:
+        assert CUT_FLAG_IN_NOISE in seg.cut_out.flags
+    # same timing, but the sound after the word is VOICE: no in_noise flag (validation must still catch it)
+    env2 = _env(8.0, speech=[(0.10, 0.40), (0.75, 1.43), (1.47, 8.0)])
+    seg2 = compile_plan(_plan(grid, (0, 1)), grid, {"a.mov": env2})[0]
+    assert CUT_FLAG_IN_NOISE not in seg2.cut_out.flags

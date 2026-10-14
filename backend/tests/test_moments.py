@@ -1,5 +1,5 @@
 """Phase 8 moment table: structural validation and clip order (no API calls)."""
-from app.tasks.moments import _validate, clip_order
+from app.tasks.moments import _clip_header, _validate, clip_order
 from app.utils.ffmpeg import parse_recording_time
 
 
@@ -49,7 +49,27 @@ def test_recording_time_only_from_real_metadata():
 def test_clips_sort_by_recording_time_only_when_every_clip_has_one(monkeypatch):
     times = {"b.mov": "2026-10-07T11:00:00+05:30", "a.mov": "2026-10-07T12:00:00+05:30", "c.mp4": None}
     monkeypatch.setattr("app.utils.ffmpeg.recording_time", lambda p: times[p])
+    monkeypatch.setattr("app.utils.ffmpeg.is_audio_only", lambda p: False)
     files = [{"filename": f, "path": f} for f in ("a.mov", "b.mov")]
     assert [c["filename"] for c in clip_order(files)] == ["b.mov", "a.mov"]          # by recording time
     files.append({"filename": "c.mp4", "path": "c.mp4"})
     assert [c["filename"] for c in clip_order(files)] == ["a.mov", "b.mov", "c.mp4"]  # one unknown: upload order
+
+
+def test_voice_over_clips_are_marked_in_the_header(monkeypatch):
+    monkeypatch.setattr("app.utils.ffmpeg.recording_time", lambda p: None)
+    monkeypatch.setattr("app.utils.ffmpeg.is_audio_only", lambda p: p.endswith(".m4a"))
+    clips = clip_order([{"filename": f, "path": f} for f in ("a.mov", "memo.m4a")])
+    assert [c["voice_over"] for c in clips] == [False, True]
+    assert _clip_header(2, 2, None, True).endswith("VOICE-OVER (audio only, no picture)")
+    assert "VOICE-OVER" not in _clip_header(1, 2, None, False)
+
+
+def test_moments_listed_in_story_order_are_re_sorted_and_references_follow():
+    ann = [{"part": "beach", "first_moment": 1}]                      # points at the moment starting at word 6
+    raw = {"moments": [_m(6, section="beach"), _m(0, role="intro"), _m(3, deps=[2], section="talk", announces=ann)]}
+    ms, notes = _validate(raw, 10)
+    assert [(m["from"], m["to"]) for m in ms] == [(0, 2), (3, 5), (6, 9)]
+    assert ms[1]["depends_on"] == [1]                                  # old #2 (the intro) is now #1
+    assert ms[1]["announces"] == ["beach"]                             # old #1 (beach) is now #3
+    assert any("re-sorted" in n for n in notes)

@@ -45,3 +45,54 @@ def test_twelve_cuts_keep_audio_and_video_the_same_length(tmp_path):
     assert abs(v - expected) < 1 / 30
     assert abs(a - v) < 1 / 30, f"audio {a:.3f}s vs video {v:.3f}s"
     assert d["audio"]["sample_rate"] == "48000"
+
+
+def test_voice_over_audio_file_gets_a_black_picture_of_its_exact_length(tmp_path):
+    _source(tmp_path / "a.mp4", 30, 48000, 1)
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=220:duration=8:sample_rate=44100",
+                    "-c:a", "aac", str(tmp_path / "vo.m4a")], check=True)
+    files = {"a.mp4": str(tmp_path / "a.mp4"), "vo.m4a": str(tmp_path / "vo.m4a")}
+    segs = [{"source_file": "a.mp4", "src_in": 0.5, "src_out": 0.5 + 45 / 30},
+            {"source_file": "vo.m4a", "src_in": 1.0, "src_out": 1.0 + 60 / 30},
+            {"source_file": "a.mp4", "src_in": 4.0, "src_out": 4.0 + 30 / 30}]
+    out = tmp_path / "out.mp4"
+    render_compiled(segs, files, str(out))
+    d = _durations(out)
+    assert int(d["video"]["nb_frames"]) == 135
+    assert abs(float(d["audio"]["duration"]) - 4.5) < 1 / 30
+    mid = subprocess.run(["ffmpeg", "-v", "error", "-ss", "2.5", "-i", str(out), "-frames:v", "1", "-vf", "scale=8:8",
+                          "-f", "rawvideo", "-pix_fmt", "gray", "-"], check=True, capture_output=True).stdout
+    assert max(mid) < 20                                 # inside the voice-over: black picture
+
+
+def _frame_rgb(path, t):
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-ss", str(t), "-i", str(path), "-frames:v", "1", "-vf", "scale=4:4",
+                          "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], check=True, capture_output=True).stdout
+    px = [raw[i:i + 3] for i in range(0, len(raw), 3)]
+    return tuple(sum(p[c] for p in px) // len(px) for c in range(3))
+
+
+def _pcm(path):
+    return subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-vn", "-f", "s16le", "-"], check=True,
+                          capture_output=True).stdout
+
+
+def test_broll_overlay_covers_only_its_slot_and_never_touches_the_sound(tmp_path):
+    _source(tmp_path / "a.mp4", 30, 48000, 1)
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=320x180:r=25:d=3",
+                    "-c:v", "libx264", str(tmp_path / "red.mp4")], check=True)       # 3 s shot, shorter than its slot
+    files = {"a.mp4": str(tmp_path / "a.mp4"), "red.mp4": str(tmp_path / "red.mp4")}
+    segs = [{"source_file": "a.mp4", "src_in": 0.5, "src_out": 0.5 + 90 / 30},
+            {"source_file": "a.mp4", "src_in": 5.0, "src_out": 5.0 + 90 / 30}]
+    plain, over = tmp_path / "plain.mp4", tmp_path / "over.mp4"
+    render_compiled(segs, files, str(plain))
+    render_compiled(segs, files, str(over), overlays=[{"source_file": "red.mp4", "src_in": 0.0,
+                                                       "rec_in": 2.0, "rec_out": 5.5}])
+    assert _pcm(plain) == _pcm(over)                     # speech audio byte-identical
+    r, g, b = _frame_rgb(over, 3.0)
+    assert r > 180 and g < 60 and b < 60                 # inside the slot: the B-roll
+    r, g, b = _frame_rgb(over, 5.2)
+    assert r > 180 and g < 60                            # past the shot's end: its last frame held
+    assert _frame_rgb(over, 1.0) == _frame_rgb(plain, 1.0)   # before the slot: the main picture
+    assert _frame_rgb(over, 5.8) == _frame_rgb(plain, 5.8)   # after the slot
+    assert int(_durations(over)["video"]["nb_frames"]) == 180

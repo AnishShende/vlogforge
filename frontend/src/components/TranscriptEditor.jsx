@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Loader2, RotateCcw, Scissors, Play, Square, AlertTriangle, CheckCircle2, FileText, Table, Flag, BookOpen, Eye, EyeOff, ChevronLeft, Plus, X, Undo2, Redo2, Keyboard, Download } from 'lucide-react';
-import EditTimeline, { functionColor } from './EditTimeline';
+import { Loader2, RotateCcw, Scissors, Play, Square, AlertTriangle, CheckCircle2, FileText, Table, Flag, BookOpen, Eye, EyeOff, ChevronLeft, Plus, X, Undo2, Redo2, Keyboard, Download, Captions } from 'lucide-react';
+import EditTimeline, { functionColor, TRACKS_H } from './EditTimeline';
+import CaptionOverlay, { useCaptions, savedCaptions, saveCaptions, isMoved, DEFAULT_PLACEMENT } from './CaptionOverlay';
 
 // Roadmap Phase 6: review screen of a word-grid job. Words come from GET /api/jobs/{id}/edit;
 // the edit is a set of kept word ids. Layout: output player + render bar (left), tabs for the
@@ -9,10 +10,16 @@ import EditTimeline, { functionColor } from './EditTimeline';
 // shift-click to select a run of words, then remove/restore it. On the timeline, drag a clip to
 // change the clip order. Every edit (kept words + clip order) is undoable. Re-compile posts the
 // plan (consecutive kept words of one file = one segment, in clip order) to /recompile.
+// Drag the handle between player and tabs, or above the timeline, to resize (double-click resets);
+// the sizes are remembered in this browser.
 
 const WS_BASE = import.meta.env.DEV ? 'ws://localhost:8000'
   : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`;
 const PARAGRAPH_GAP_SEC = 1.0;
+const LAYOUT_KEY = 'vlogforge.editorLayout';
+const DEFAULT_LEFT_PCT = 100 * 5 / 12;
+const MIN_LEFT_PX = 320, MIN_RIGHT_PX = 380, MIN_TOP_PX = 260, MIN_TRACKS_H = 60;
+const savedLayout = () => { try { return JSON.parse(localStorage.getItem(LAYOUT_KEY)) || {}; } catch { return {}; } };
 
 const keptFromPlan = (words, plan) => {
   const index = new Map(words.map((w, i) => [w.id, i]));
@@ -72,6 +79,8 @@ export default function TranscriptEditor({ jobId, onReset }) {
   const [anchor, setAnchor] = useState(null);
   const [recompiling, setRecompiling] = useState(false);
   const [videoKey, setVideoKey] = useState(Date.now());
+  const [captionStyle, setCaptionStyle] = useState(() => savedCaptions(jobId));   // live caption overlay ('' = off)
+  const { data: captions, placement: captionPlace, setPlacement: setCaptionPlace } = useCaptions(jobId, videoKey);
   const [currentTime, setCurrentTime] = useState(0);
   const [auditioning, setAuditioning] = useState(null);   // range key being played from source
   const [tab, setTab] = useState('transcript');
@@ -84,7 +93,10 @@ export default function TranscriptEditor({ jobId, onReset }) {
   const [selectedClip, setSelectedClip] = useState(null);
   const [wave, setWave] = useState(null);                 // output waveform { rate, peaks }
   const [showKeys, setShowKeys] = useState(false);
+  const [leftPct, setLeftPct] = useState(() => savedLayout().leftPct ?? DEFAULT_LEFT_PCT);
+  const [tracksH, setTracksH] = useState(() => savedLayout().tracksH ?? TRACKS_H);
   const keyHandler = useRef(null);
+  const topRef = useRef(null);
   const videoRef = useRef(null);
   const sourceRef = useRef(null);
 
@@ -104,6 +116,30 @@ export default function TranscriptEditor({ jobId, onReset }) {
   };
 
   useEffect(() => { load(); }, [jobId]);
+
+  useEffect(() => {
+    try { localStorage.setItem(LAYOUT_KEY, JSON.stringify({ leftPct, tracksH })); } catch { /* storage blocked: sizes reset next visit */ }
+  }, [leftPct, tracksH]);
+
+  // Resize handles: follow the pointer until release (pointer capture keeps the video from taking it)
+  const dragHandle = (e, onMove) => {
+    e.preventDefault();
+    const el = e.currentTarget;
+    el.setPointerCapture(e.pointerId); el.classList.add('dragging');
+    const end = () => { el.classList.remove('dragging'); el.removeEventListener('pointermove', onMove); el.removeEventListener('pointerup', end); el.removeEventListener('pointercancel', end); };
+    el.addEventListener('pointermove', onMove); el.addEventListener('pointerup', end); el.addEventListener('pointercancel', end);
+  };
+  const resizeColumns = (e) => {
+    const r = topRef.current.getBoundingClientRect();
+    dragHandle(e, (ev) => {
+      const x = Math.min(r.width - MIN_RIGHT_PX, Math.max(MIN_LEFT_PX, ev.clientX - r.left));
+      setLeftPct(100 * x / r.width);
+    });
+  };
+  const resizeTimeline = (e) => {
+    const y0 = e.clientY, h0 = tracksH, maxH = h0 + topRef.current.getBoundingClientRect().height - MIN_TOP_PX;
+    dragHandle(e, (ev) => setTracksH(Math.round(Math.min(maxH, Math.max(MIN_TRACKS_H, h0 + y0 - ev.clientY)))));
+  };
 
   // Keyboard shortcuts: the handler is rebuilt each render (below) so it sees current state
   useEffect(() => {
@@ -390,21 +426,37 @@ export default function TranscriptEditor({ jobId, onReset }) {
   ];
 
   return (
-    <div style={{ display: 'grid', gridTemplateRows: 'minmax(0, 1fr) auto', gridTemplateColumns: 'minmax(0, 1fr)', gap: '0.75rem', padding: '0.75rem 1rem 1rem', height: '100%', minHeight: 0 }}>
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(340px, 5fr) minmax(0, 7fr)', gap: '0.75rem', minHeight: 0 }}>
+    <div style={{ display: 'grid', gridTemplateRows: segments.length ? 'minmax(0, 1fr) 0.75rem auto' : 'minmax(0, 1fr)', gridTemplateColumns: 'minmax(0, 1fr)', padding: '0.75rem 1rem 1rem', height: '100%', minHeight: 0 }}>
+      <div ref={topRef} style={{ display: 'grid', gridTemplateColumns: `minmax(${MIN_LEFT_PX}px, ${leftPct}%) 0.75rem minmax(0, 1fr)`, minHeight: 0 }}>
 
         {/* ── Left: output player + render bar ── */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', minHeight: 0, minWidth: 0 }}>
           <div style={{ ...panel, flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', padding: '0.75rem' }}>
-            <div style={{ flex: 1, minHeight: 0, background: '#000', borderRadius: 'var(--radius-md)', overflow: 'hidden', display: 'flex' }}>
+            <div style={{ position: 'relative', flex: 1, minHeight: 0, background: '#000', borderRadius: 'var(--radius-md)', overflow: 'hidden', display: 'flex' }}>
               <video key={videoKey} ref={videoRef} src={`/api/jobs/${jobId}/download?t=${videoKey}`} controls
                 onTimeUpdate={(e) => setCurrentTime(e.target.currentTime)} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+              <CaptionOverlay videoRef={videoRef} videoKey={videoKey} data={captions} style={captionStyle}
+                placement={captionPlace} onPlacement={setCaptionPlace} />
             </div>
             <video ref={sourceRef} style={{ display: 'none' }} />
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.65rem', flexWrap: 'wrap' }}>
               <span style={{ fontSize: '0.8rem', color: 'var(--text-main)', fontWeight: 600 }}>{fmt(view.duration_sec || 0)}</span>
               <span style={muted}>· {segments.length} clips · {kept.size} of {words.length} words kept</span>
               <span style={{ flex: 1 }} />
+              {captions && (
+                <label style={{ ...muted, fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.35rem' }}
+                  title={`Shown over the player, changing every ${captions.block_sec} s; burned in when you export`}>
+                  <Captions size={13} />
+                  <select className="input-field" value={captionStyle} style={{ padding: '0.15rem 0.4rem', fontSize: '0.75rem', width: 'auto' }}
+                    onChange={(e) => { setCaptionStyle(e.target.value); saveCaptions(jobId, e.target.value); }}>
+                    <option value="">Captions off</option>
+                    {Object.entries(captions.styles).map(([k, st]) => <option key={k} value={k}>{st.name}</option>)}
+                  </select>
+                  {captionStyle && isMoved(captionPlace) && (
+                    <button className="re-btn small icon" onClick={(e) => { e.preventDefault(); setCaptionPlace(DEFAULT_PLACEMENT, true); }}
+                      title={`Caption ${Math.round(captionPlace.scale * 100)}% size${captionPlace.x !== null ? ', moved' : ''}: reset to the style's own place and size`}>
+                      <RotateCcw size={12} /></button>)}
+                </label>)}
               <button className="re-btn small" onClick={() => setShowChecks(!showChecks)} title="Render checks"
                 style={{ color: validation.status === 'pass' ? 'var(--success)' : validation.status === 'fail' ? 'var(--danger)' : 'var(--warning)' }}>
                 {validation.status === 'pass' ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />}
@@ -446,6 +498,9 @@ export default function TranscriptEditor({ jobId, onReset }) {
             {onReset && <button className="re-btn icon" title="New project" onClick={onReset}><Plus size={15} /></button>}
           </div>
         </div>
+
+        <div className="re-split col" role="separator" aria-orientation="vertical" title="Drag to resize · double-click to reset"
+          onPointerDown={resizeColumns} onDoubleClick={() => setLeftPct(DEFAULT_LEFT_PCT)} />
 
         {/* ── Right: tabs ── */}
         <div style={{ ...panel, padding: 0, display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0 }}>
@@ -579,12 +634,14 @@ export default function TranscriptEditor({ jobId, onReset }) {
         </div>
       </div>
 
-      {segments.length > 0 && (
+      {segments.length > 0 && <>
+        <div className="re-split row" role="separator" aria-orientation="horizontal" title="Drag to resize the timeline · double-click to reset"
+          onPointerDown={resizeTimeline} onDoubleClick={() => setTracksH(TRACKS_H)} />
         <EditTimeline segments={segments} order={order} wordsById={wordsById} wordOut={view.word_out} wave={wave}
           currentTime={currentTime} onSeek={seek} warnings={segWarnings} selectedClip={selectedClip}
           onClipClick={selectClip} onReorder={(next) => commit({ order: next })}
-          kept={kept} added={clipAdds} trim={trimTarget} onTrim={applyTrim} />
-      )}
+          kept={kept} added={clipAdds} trim={trimTarget} onTrim={applyTrim} tracksH={tracksH} />
+      </>}
     </div>
   );
 }

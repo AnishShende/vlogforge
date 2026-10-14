@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Download, RefreshCw, Copy, Check, FileText, Loader2, AlertTriangle, Plus, CheckCircle2, Play, Pause } from 'lucide-react';
+import { savedCaptions } from './CaptionOverlay';
 
 // Export panel of a word-grid job: the post copy for the last render (GET /api/jobs/{id}/publish) and
 // the files: the video in standard layouts (16:9 is the main render; 9:16, 1:1, 4:5 render on demand
-// from the same edit, GET/POST /api/jobs/{id}/layouts) and the EDL / FCPXML. Under a minute: 3 Instagram caption variations + a grouped hashtag
+// from the same edit, GET/POST /api/jobs/{id}/layouts; each layout also with burned-in captions in one style,
+// ?captions=<style>: separate files, the main render stays clean) and the EDL / FCPXML. Under a minute: 3 Instagram caption variations + a grouped hashtag
 // block; from a minute: 3 YouTube title styles, the 3-part description with the chapter timeline,
 // pinned-comment options and hashtags. Every text is editable before copying; the selected
 // variation / title is what "Copy all" uses.
@@ -27,14 +29,17 @@ const fieldsOf = (d) => d.format === 'short'
 // the layout file will show (same frames and audio, lower resolution). Per clip, so mixed shapes work.
 const STAGE_W = 560, STAGE_H = 300;
 
+const fileUrl = (jobId, key, captions) => captions ? `/api/jobs/${jobId}/layouts/${key}/download?captions=${captions}`
+  : key === '16x9' ? `/api/jobs/${jobId}/download` : `/api/jobs/${jobId}/layouts/${key}/download`;
+
 function LayoutPreview({ jobId, layout, segments, sources, mainSize }) {
   const ref = useRef(null);
   const [t, setT] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [dur, setDur] = useState(0);
   const poster = useRef(false);                       // resting on a still past the fade-in, not yet played
-  const real = layout.status === 'ready';
-  const src = layout.key === '16x9' ? `/api/jobs/${jobId}/download` : real ? `/api/jobs/${jobId}/layouts/${layout.key}/download` : `/api/jobs/${jobId}/download`;
+  const real = layout.status === 'ready' || (layout.key === '16x9' && !layout.captions);   // 16:9 = the main render
+  const src = real ? fileUrl(jobId, layout.key, layout.captions) : `/api/jobs/${jobId}/download`;
 
   // Follow the playing frame (per video frame where supported, so the framing switches on the cut)
   useEffect(() => {
@@ -77,7 +82,9 @@ function LayoutPreview({ jobId, layout, segments, sources, mainSize }) {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '1rem', marginBottom: '0.75rem', flexWrap: 'wrap' }}>
         <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>Preview · {layout.ratio} {layout.name}</span>
         <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-          {real ? `the rendered ${layout.size[0]}×${layout.size[1]} file` : 'simulated from your 16:9 render; the rendered file will look the same'}</span>
+          {real ? `the rendered ${layout.size[0]}×${layout.size[1]} file`
+            : layout.captions ? 'simulated from your 16:9 render, without captions: render it to see them'
+            : 'simulated from your 16:9 render; the rendered file will look the same'}</span>
       </div>
       <div style={{ height: STAGE_H, display: 'grid', placeItems: 'center' }}>
         <div onClick={toggle} style={{ position: 'relative', width: cw, height: chh, background: '#000', overflow: 'hidden', borderRadius: 4, outline: '1px solid #333', cursor: 'pointer' }}>
@@ -108,13 +115,25 @@ export default function PublishPanel({ jobId, onReset }) {
   const [layoutMeta, setLayoutMeta] = useState({ sources: {}, main: [1920, 1080] });
   const [previewKey, setPreviewKey] = useState(null);   // layout shown in the preview (default: the suggested one)
   const [layoutError, setLayoutError] = useState(null);
+  const [captions, setCaptions] = useState(() => savedCaptions(jobId));   // caption style of the files shown ('' = none); starts at the editor's pick
+  const [captionStyles, setCaptionStyles] = useState([]);
+  const [blockSec, setBlockSec] = useState(1);
+  const captionsRef = useRef(captions);                 // drop responses for a style no longer selected
+  const capQuery = captions ? `?captions=${captions}` : '';
 
-  const loadLayouts = () => fetch(`/api/jobs/${jobId}/layouts`)
-    .then(async r => { const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.statusText); setLayouts(d.layouts); setLayoutMeta({ sources: d.sources || {}, main: d.main_size || [1920, 1080] }); })
+  const loadLayouts = (style = captionsRef.current) => fetch(`/api/jobs/${jobId}/layouts${style ? `?captions=${style}` : ''}`)
+    .then(async r => {
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || r.statusText);
+      if (style !== captionsRef.current) return;
+      setLayouts(d.layouts); setLayoutMeta({ sources: d.sources || {}, main: d.main_size || [1920, 1080] });
+      setCaptionStyles(d.caption_styles || []); setBlockSec(d.caption_block_sec || 1);
+    })
     .catch(e => setLayoutError(e.message));
+  const pickCaptions = (style) => { captionsRef.current = style; setCaptions(style); setLayoutError(null); loadLayouts(style); };
   const renderLayout = async (key) => {
     setLayouts(ls => ls.map(l => l.key === key ? { ...l, status: 'rendering', error: null } : l));
-    const r = await fetch(`/api/jobs/${jobId}/layouts/${key}/render`, { method: 'POST' });
+    const r = await fetch(`/api/jobs/${jobId}/layouts/${key}/render${capQuery}`, { method: 'POST' });
     if (!r.ok) setLayoutError((await r.json()).detail || r.statusText);
     loadLayouts();
   };
@@ -143,9 +162,9 @@ export default function PublishPanel({ jobId, onReset }) {
   const rendering = layouts?.some(l => l.status === 'rendering');
   useEffect(() => {
     if (!rendering) return;
-    const t = setInterval(loadLayouts, 2000);
+    const t = setInterval(() => loadLayouts(), 2000);
     return () => clearInterval(t);
-  }, [rendering, jobId]);
+  }, [rendering, jobId, captions]);
 
   const doCopy = (key, text) => navigator.clipboard.writeText(text).then(() => { setCopied(key); setTimeout(() => setCopied(null), 1600); });
   const CopyBtn = ({ k, text, label = 'Copy' }) => (
@@ -205,6 +224,15 @@ export default function PublishPanel({ jobId, onReset }) {
       <section>
         <div style={{ ...sectionTitle, marginBottom: '0.6rem' }}>VIDEO <span style={{ fontWeight: 400, letterSpacing: 0 }}>· same edit, pick the shapes you need</span></div>
         {layoutError && <div style={{ ...stateBox, marginTop: 0, marginBottom: '0.6rem', color: 'var(--danger)' }}><AlertTriangle size={16} /> {layoutError}</div>}
+        {captionStyles.length > 0 && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
+            <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginRight: '0.25rem' }}>Captions</span>
+            {[{ key: '', name: 'Off', description: 'No captions' }, ...captionStyles].map(c => (
+              <button key={c.key || 'off'} className={`re-btn small pp-cc pp-cc-${c.key || 'off'}${captions === c.key ? ' active' : ''}`}
+                onClick={() => pickCaptions(c.key)} title={c.description}>{c.name}</button>))}
+            {captions && <span style={{ fontSize: '0.72rem', color: 'var(--text-disabled)' }}>
+              burned in, changing every {blockSec} s · a separate file per layout</span>}
+          </div>)}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '0.75rem' }}>
           {(layouts || []).map(l => {
             const [w, h] = l.size, k = 40 / Math.max(w, h);
@@ -223,7 +251,7 @@ export default function PublishPanel({ jobId, onReset }) {
                 <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginTop: 2 }}>{l.for}</div>
                 {l.status === 'stale' && <div style={{ fontSize: '0.72rem', color: 'var(--warning)', marginTop: '0.35rem' }}>Outdated: made from an older edit</div>}
                 <div style={{ marginTop: 'auto', paddingTop: '0.7rem' }}>
-                  {l.status === 'ready' && <a className="re-btn small primary pp-full" href={`/api/jobs/${jobId}/layouts/${l.key}/download`} download><Download size={12} /> Download</a>}
+                  {l.status === 'ready' && <a className="re-btn small primary pp-full" href={fileUrl(jobId, l.key, captions)} download><Download size={12} /> Download</a>}
                   {l.status === 'rendering' && <button className="re-btn small pp-full" disabled><Loader2 size={12} className="spinner" /> Rendering…</button>}
                   {l.status === 'none' && <button className="re-btn small pp-full" onClick={() => renderLayout(l.key)}>Render</button>}
                   {l.status === 'stale' && <button className="re-btn small pp-full" onClick={() => renderLayout(l.key)} title="Made from an older version of the edit"><RefreshCw size={12} /> Re-render</button>}

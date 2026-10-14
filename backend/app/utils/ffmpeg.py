@@ -507,6 +507,12 @@ def _render_scale(w: int, h: int) -> str:
 _LOUDNORM = "loudnorm=I=-14:TP=-1.5:LRA=11"
 
 
+def is_audio_only(path: str) -> bool:
+    """True for a file without a picture (a voice-over recording); cover art does not count as a picture."""
+    return not any(s.get("codec_type") == "video" and not (s.get("disposition") or {}).get("attached_pic")
+                   for s in get_video_info(path).get("streams", []))
+
+
 def _compiled_inputs(segments: List[Dict], file_map: Dict[str, str]) -> List[str]:
     """One accurately seeked input per segment (+0.5 s slack; exact length is set in-graph)."""
     args = []
@@ -516,6 +522,21 @@ def _compiled_inputs(segments: List[Dict], file_map: Dict[str, str]) -> List[str
             raise FileNotFoundError(f"source for {s['source_file']!r} not found at {src!r}")
         args += ["-ss", f"{s['src_in']:.6f}", "-t", f"{s['src_out'] - s['src_in'] + 0.5:.6f}", "-i", src]
     return args
+
+
+def _picture_inputs(segments: List[Dict], file_map: Dict[str, str], fps: int, size: Tuple[int, int]) -> Tuple[List[str], Dict[int, int]]:
+    """Segments from audio-only files (voice-over) have no picture: one black lavfi input each, appended
+    after the segment inputs. Returns (extra args, {segment index: input index of its picture})."""
+    args, pic, audio_only = [], {}, {}
+    for i, s in enumerate(segments):
+        src = file_map[s["source_file"]]
+        if src not in audio_only:
+            audio_only[src] = is_audio_only(src)
+        if audio_only[src]:
+            pic[i] = len(segments) + len(pic)
+            args += ["-f", "lavfi", "-t", f"{s['src_out'] - s['src_in'] + 0.5:.6f}", "-i",
+                     f"color=c=black:s={size[0]}x{size[1]}:r={fps}"]
+    return args, pic
 
 
 def _compiled_audio_graph(segments: List[Dict], fps: int, join_fade: float, head_fade: float,
@@ -550,21 +571,54 @@ def _measure_loudness(cmd_inputs: List[str], audio_graph: List[str]) -> Dict:
     return json.loads(err[err.rindex("{"): err.rindex("}") + 1])
 
 
+def _overlay_inputs(overlays: List[Dict], file_map: Dict[str, str]) -> List[str]:
+    """One accurately seeked input per overlay (picture only; +0.5 s slack, exact length set in-graph)."""
+    args = []
+    for o in overlays:
+        src = file_map.get(o["source_file"])
+        if not src or not os.path.exists(src):
+            raise FileNotFoundError(f"overlay source {o['source_file']!r} not found at {src!r}")
+        dur = o["src_out"] - o["src_in"] if o.get("src_out") else o["rec_out"] - o["rec_in"] + 0.5
+        args += ["-ss", f"{o['src_in']:.6f}", "-t", f"{dur:.6f}", "-an", "-i", src]   # never past the shot's end
+    return args
+
+
+def _overlay_graph(overlays: List[Dict], first_input: int, fps: int, size: Tuple[int, int], base: str) -> List[str]:
+    """Lay each overlay's picture over [base] from rec_in to rec_out (output clock, whole frames); a shot shorter
+    than its slot holds its last frame. Output label [vov]. The audio graph is not touched."""
+    parts, cur = [], base
+    for k, o in enumerate(overlays):
+        a, b = round(o["rec_in"] * fps), round(o["rec_out"] * fps)
+        parts.append(f"[{first_input + k}:v]setpts=PTS-STARTPTS,fps={fps},{_render_scale(*size)},"
+                     f"tpad=stop_mode=clone:stop_duration={(b - a) / fps + 0.5:.4f},trim=end_frame={b - a},"
+                     f"setpts=PTS-STARTPTS+{a}/({fps}*TB)[o{k}]")
+        nxt = "vov" if k == len(overlays) - 1 else f"ov{k}"
+        parts.append(f"[{cur}][o{k}]overlay=eof_action=pass:enable='between(n,{a},{b - 1})'[{nxt}]")
+        cur = nxt
+    return parts
+
+
 def render_compiled(segments: List[Dict], file_map: Dict[str, str], output_path: str, fps: int = 30,
                     join_fade: float = 0.015, head_fade: float = 0.0, tail_fade: float = 0.0,
-                    size: Tuple[int, int] = RENDER_SIZE) -> Dict:
+                    size: Tuple[int, int] = RENDER_SIZE, overlays: Optional[List[Dict]] = None,
+                    subtitles: Optional[str] = None) -> Dict:
     """Render compiled segments [{source_file, src_in, src_out}] in one pass.
 
     Video and audio of every segment have the same exact length (whole frames; the compiler
     snaps segment lengths), so A/V stays in sync across any number of cuts. Joins get short
     non-overlapping audio fades; loudness is normalised once over the whole output (two-pass
     loudnorm, linear gain), not per clip. size: output frame (w, h), each clip fitted with black bars.
+    A segment from an audio-only file (voice-over) gets a black picture of its exact length; its sound is
+    treated like any other segment's. overlays: [{source_file, src_in, rec_in, rec_out}] B-roll pictures laid
+    over the main picture on the OUTPUT clock (rec_*: seconds of the output); the sound is never touched.
+    subtitles: path of an ASS file (output clock, PlayRes = size) burned in over picture and B-roll, under the fades.
     Returns {"loudness": measured, "duration_sec": ...}.
     Raises on failure (fail loud; no fallback path).
     """
     if not segments:
         raise ValueError("render_compiled: no segments")
     inputs = _compiled_inputs(segments, file_map)
+    pic_args, pic = _picture_inputs(segments, file_map, fps, size)
     measured = _measure_loudness(inputs, _compiled_audio_graph(
         segments, fps, join_fade, head_fade, tail_fade, _LOUDNORM + ":print_format=json"))
     norm = (f"{_LOUDNORM}:measured_I={measured['input_i']}:measured_TP={measured['input_tp']}"
@@ -575,16 +629,28 @@ def render_compiled(segments: List[Dict], file_map: Dict[str, str], output_path:
     for i, s in enumerate(segments):
         frames = round((s["src_out"] - s["src_in"]) * fps)
         total += frames / fps
-        video.append(f"[{i}:v]setpts=PTS-STARTPTS,fps={fps},{_render_scale(*size)},tpad=stop_mode=clone:stop_duration=0.5,"
+        video.append(f"[{pic.get(i, i)}:v]setpts=PTS-STARTPTS,fps={fps},{_render_scale(*size)},tpad=stop_mode=clone:stop_duration=0.5,"
                      f"trim=end_frame={frames},setpts=PTS-STARTPTS[v{i}]")
     vins = "".join(f"[v{i}]" for i in range(len(segments)))
-    video.append(f"{vins}concat=n={len(segments)}:v=1:a=0,fade=in:st=0:d=0.5,"
-                 f"fade=out:st={max(0.0, total - 1.0):.6f}:d=1.0[vout]")
+    overlays = [o for o in overlays or [] if round(o["rec_out"] * fps) > round(o["rec_in"] * fps)]
+    fades = f"fade=in:st=0:d=0.5,fade=out:st={max(0.0, total - 1.0):.6f}:d=1.0"
+    if subtitles:
+        if not os.path.exists(subtitles):
+            raise FileNotFoundError(f"subtitles file not found: {subtitles!r}")
+        if any(c in subtitles for c in ":'\\,;[]"):     # filtergraph syntax; the caller picks a plain temp path
+            raise ValueError(f"subtitles path has filtergraph characters: {subtitles!r}")
+        fades = f"ass=filename='{subtitles}',{fades}"
+    if overlays:                   # B-roll over the main picture, then the global fades over both
+        video.append(f"{vins}concat=n={len(segments)}:v=1:a=0[vbase]")
+        video += _overlay_graph(overlays, len(segments) + len(pic), fps, size, "vbase")
+        video.append(f"[vov]{fades}[vout]")
+    else:
+        video.append(f"{vins}concat=n={len(segments)}:v=1:a=0,{fades}[vout]")
     graph = video + _compiled_audio_graph(segments, fps, join_fade, head_fade, tail_fade, norm)
-    cmd = [get_ffmpeg_path(), "-y", *inputs, "-filter_complex", ";".join(graph),
-           "-map", "[vout]", "-map", "[aout]", "-r", str(fps), "-c:v", get_hw_encoder(), "-pix_fmt", "yuv420p",
+    cmd = [get_ffmpeg_path(), "-y", *inputs, *pic_args, *_overlay_inputs(overlays, file_map),
+           "-filter_complex", ";".join(graph), "-map", "[vout]", "-map", "[aout]", "-r", str(fps), "-c:v", get_hw_encoder(), "-pix_fmt", "yuv420p",
            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", output_path]
-    logger.info(f"Compiled render: {len(segments)} segments -> {output_path} ({total:.2f}s, {size[0]}x{size[1]}), "
+    logger.info(f"Compiled render: {len(segments)} segments + {len(overlays)} overlays{' + subtitles' if subtitles else ''} -> {output_path} ({total:.2f}s, {size[0]}x{size[1]}), "
                 f"input loudness {measured['input_i']} LUFS")
     run_ffmpeg_with_gpu_fallback(cmd)
     return {"loudness": measured, "duration_sec": round(total, 6)}

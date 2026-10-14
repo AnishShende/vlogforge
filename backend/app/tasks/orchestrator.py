@@ -215,6 +215,9 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
         safe_broadcast("ingesting", 5, "Validating and extracting audio...")
 
         # Concurrent per-file ingestion via ThreadPoolExecutor
+        # Word-grid jobs make the edit from the word grid alone: the legacy perception stages (scenes,
+        # gap checks, frame descriptions, JEV, retakes, EGT, M5 metadata) would only be stored.
+        grid_only = settings.enable_word_grid_compiler
         ingest_results: Dict[int, dict] = {}
         ingest_errors: Dict[int, str] = {}
         total_files = len(video_paths)
@@ -227,7 +230,7 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
                 5 + int(10 * (idx / total_files)),
                 f"Ingesting video {idx + 1} of {total_files}: {filename}..."
             )
-            result = ingest_video(video_path, job_dir)
+            result = ingest_video(video_path, job_dir, scenes=not grid_only)
             return idx, result
 
         max_workers = min(total_files, os.cpu_count() or 4)
@@ -316,133 +319,135 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
                 word_grid = check_word_grid(word_grid, envs)
             logger.info(f"[WORD-GRID] {summarize_word_grid(word_grid)}")
 
-        # Align transcripts with EGT segments
-        all_segments = align_transcript_with_segments(all_segments, full_transcript_segments)
+        if not grid_only:
+            # Align transcripts with EGT segments
+            all_segments = align_transcript_with_segments(all_segments, full_transcript_segments)
 
-        # ---- Stage 3a: Speech-gap Refinement (duration-relative) ----
-        check_cancelled()
-        safe_broadcast("refining", 40, "Refining long segments using speech gaps...")
+            # ---- Stage 3a: Speech-gap Refinement (duration-relative) ----
+            check_cancelled()
+            safe_broadcast("refining", 40, "Refining long segments using speech gaps...")
 
-        # Compute dynamic thresholds from target_duration
-        dynamic_long_scene = max(
-            settings.long_scene_floor_sec,
-            target_duration * settings.long_scene_ratio,
-        )
-        dynamic_speech_gap = settings.speech_gap_floor_sec
-        logger.info(
-            f"Dynamic thresholds (target_duration={target_duration:.0f}s): "
-            f"long_scene={dynamic_long_scene:.1f}s, speech_gap={dynamic_speech_gap:.1f}s"
-        )
-
-        # Build per-file CFR path lookup for keyframe extraction
-        for f_info in files_info:
-            cfr_path = f_info.get("cfr_path", "")
-            filename = f_info.get("filename", "")
-            keyframes_dir = os.path.join(job_dir, "keyframes")
-
-            if cfr_path and os.path.exists(cfr_path):
-                all_segments = subdivide_by_speech_gaps(
-                    segments=all_segments,
-                    transcript_segments=full_transcript_segments,
-                    long_scene_threshold_sec=dynamic_long_scene,
-                    speech_gap_sec=dynamic_speech_gap,
-                    video_path=cfr_path,
-                    keyframes_dir=keyframes_dir,
-                    context_notes=context_text,
-                )
-
-        # ---- Stage 3a.5: Editorial subdivision for LLM Director ----
-        check_cancelled()
-        safe_broadcast("refining", 44, "Creating editorial sub-segments...")
-
-        all_segments = editorial_subdivide(
-            segments=all_segments,
-            transcript_segments=full_transcript_segments,
-            target_duration=target_duration,
-            files_info=files_info,
-            job_dir=job_dir,
-        )
-
-        # ---- Stage 3b: Visual Analysis (Keyframe Description + Tags) ----
-        check_cancelled()
-        safe_broadcast("analyzing", 48, "Running visual keyframe analysis...")
-
-        analysis_result = analyze_segments(
-            segments=all_segments, 
-            user_context=context_text,
-            job_dir=job_dir,
-            files_info=files_info
-        )
-        all_segments = analysis_result["segments"]
-        context_summary = analysis_result["context_summary"]
-
-        # ---- Stage 4: Quality Scoring ----
-        check_cancelled()
-        safe_broadcast("classifying", 55, "Classifying segments...")
-
-        # M4: Classify using batch path. Progress fires per-batch, so for 1000 segments
-        # at batch_size=10 this is 100 callbacks instead of 1000 — much less lock contention.
-        total_segs = len(all_segments)
-        batch_size = settings.classification_batch_size
-        total_batches = max(1, (total_segs + batch_size - 1) // batch_size)
-
-        def scoring_progress(done: int, total: int):
-            # `done` and `total` here are segment counts (batch func fires per segment internally)
-            # We remap to 55–65% range, scaled dynamically on segment count.
-            pct = 55 + int(10 * done / max(1, total))
-            batch_num = max(1, (done + batch_size - 1) // batch_size)
-            safe_broadcast(
-                "classifying", pct,
-                f"Classifying segments: batch {batch_num}/{total_batches} ({done}/{total} segments)..."
+            # Compute dynamic thresholds from target_duration
+            dynamic_long_scene = max(
+                settings.long_scene_floor_sec,
+                target_duration * settings.long_scene_ratio,
+            )
+            dynamic_speech_gap = settings.speech_gap_floor_sec
+            logger.info(
+                f"Dynamic thresholds (target_duration={target_duration:.0f}s): "
+                f"long_scene={dynamic_long_scene:.1f}s, speech_gap={dynamic_speech_gap:.1f}s"
             )
 
-        all_segments = score_segments(
-            all_segments, total_raw_duration, context_summary, quality_threshold,
-            progress_callback=scoring_progress
-        )
+            # Build per-file CFR path lookup for keyframe extraction
+            for f_info in files_info:
+                cfr_path = f_info.get("cfr_path", "")
+                filename = f_info.get("filename", "")
+                keyframes_dir = os.path.join(job_dir, "keyframes")
 
-        # ---- Stage 5: EGT Assembly & Validation ----
-        check_cancelled()
-        safe_broadcast("classifying", 64, "Building Editorial Ground Truth document...")
+                if cfr_path and os.path.exists(cfr_path):
+                    all_segments = subdivide_by_speech_gaps(
+                        segments=all_segments,
+                        transcript_segments=full_transcript_segments,
+                        long_scene_threshold_sec=dynamic_long_scene,
+                        speech_gap_sec=dynamic_speech_gap,
+                        video_path=cfr_path,
+                        keyframes_dir=keyframes_dir,
+                        context_notes=context_text,
+                    )
 
-        egt_doc = build_egt_document(
-            segments=all_segments,
-            context_summary=context_summary,
-            source_file_count=total_files,
-            total_duration=total_raw_duration,
-        )
-        
-        # ---- Stage 5.5: Retake Detection & Resolution ----
-        check_cancelled()
-        safe_broadcast("classifying", 65, "Detecting and clustering retakes...")
-        egt_doc = detect_and_resolve_retakes(egt_doc)
-
-        # ---- Stage 5.6: Word-timeline clean-take selection (flag-gated) ----
-        # Replaces the SPEECH portion of the EGT with punctuation-free,
-        # JEV-judged clean takes (one per distinct line), keeping non-speech /
-        # B-roll for the legacy path. Downstream EDL/word-snap/assembly consume
-        # the synthetic clip_ids unchanged.
-        # Skipped when the word-grid compiler makes the edit: its result would be unused.
-        if settings.enable_word_timeline_redundancy and not settings.enable_word_grid_compiler:
+            # ---- Stage 3a.5: Editorial subdivision for LLM Director ----
             check_cancelled()
-            safe_broadcast("classifying", 66, "Selecting clean takes from the word timeline...")
-            egt_doc, wt_warnings = apply_word_timeline_selection(egt_doc)
-            all_segments = egt_doc.segments  # keep segments_by_clip_id / egt_clip_ids consistent
-            if wt_warnings and job_id in jobs_db:
-                jobs_db[job_id].warnings.extend(wt_warnings)
+            safe_broadcast("refining", 44, "Creating editorial sub-segments...")
 
-        # Store EGT and transcript data
-        jobs_data_db[job_id] = {
-            "egt": egt_to_serializable(egt_doc),
-            "transcript": [seg.model_dump() for seg in all_segments],
-            "context_document": context_summary,
-        }
+            all_segments = editorial_subdivide(
+                segments=all_segments,
+                transcript_segments=full_transcript_segments,
+                target_duration=target_duration,
+                files_info=files_info,
+                job_dir=job_dir,
+            )
+
+            # ---- Stage 3b: Visual Analysis (Keyframe Description + Tags) ----
+            check_cancelled()
+            safe_broadcast("analyzing", 48, "Running visual keyframe analysis...")
+
+            analysis_result = analyze_segments(
+                segments=all_segments, 
+                user_context=context_text,
+                job_dir=job_dir,
+                files_info=files_info
+            )
+            all_segments = analysis_result["segments"]
+            context_summary = analysis_result["context_summary"]
+
+            # ---- Stage 4: Quality Scoring ----
+            check_cancelled()
+            safe_broadcast("classifying", 55, "Classifying segments...")
+
+            # M4: Classify using batch path. Progress fires per-batch, so for 1000 segments
+            # at batch_size=10 this is 100 callbacks instead of 1000 — much less lock contention.
+            total_segs = len(all_segments)
+            batch_size = settings.classification_batch_size
+            total_batches = max(1, (total_segs + batch_size - 1) // batch_size)
+
+            def scoring_progress(done: int, total: int):
+                # `done` and `total` here are segment counts (batch func fires per segment internally)
+                # We remap to 55–65% range, scaled dynamically on segment count.
+                pct = 55 + int(10 * done / max(1, total))
+                batch_num = max(1, (done + batch_size - 1) // batch_size)
+                safe_broadcast(
+                    "classifying", pct,
+                    f"Classifying segments: batch {batch_num}/{total_batches} ({done}/{total} segments)..."
+                )
+
+            all_segments = score_segments(
+                all_segments, total_raw_duration, context_summary, quality_threshold,
+                progress_callback=scoring_progress
+            )
+
+            # ---- Stage 5: EGT Assembly & Validation ----
+            check_cancelled()
+            safe_broadcast("classifying", 64, "Building Editorial Ground Truth document...")
+
+            egt_doc = build_egt_document(
+                segments=all_segments,
+                context_summary=context_summary,
+                source_file_count=total_files,
+                total_duration=total_raw_duration,
+            )
+        
+            # ---- Stage 5.5: Retake Detection & Resolution ----
+            check_cancelled()
+            safe_broadcast("classifying", 65, "Detecting and clustering retakes...")
+            egt_doc = detect_and_resolve_retakes(egt_doc)
+
+            # ---- Stage 5.6: Word-timeline clean-take selection (flag-gated) ----
+            # Replaces the SPEECH portion of the EGT with punctuation-free,
+            # JEV-judged clean takes (one per distinct line), keeping non-speech /
+            # B-roll for the legacy path. Downstream EDL/word-snap/assembly consume
+            # the synthetic clip_ids unchanged.
+            if settings.enable_word_timeline_redundancy:
+                check_cancelled()
+                safe_broadcast("classifying", 66, "Selecting clean takes from the word timeline...")
+                egt_doc, wt_warnings = apply_word_timeline_selection(egt_doc)
+                all_segments = egt_doc.segments  # keep segments_by_clip_id / egt_clip_ids consistent
+                if wt_warnings and job_id in jobs_db:
+                    jobs_db[job_id].warnings.extend(wt_warnings)
+
+            # Store EGT and transcript data
+            jobs_data_db[job_id] = {
+                "egt": egt_to_serializable(egt_doc),
+                "transcript": [seg.model_dump() for seg in all_segments],
+                "context_document": context_summary,
+            }
+        else:
+            jobs_data_db[job_id] = {}
         if word_grid is not None:
             jobs_data_db[job_id]["word_grid"] = word_grid.model_dump()
 
         # ==================================================================
         # Archdoc Phase 4 path (flag-gated): grid cleanup -> compiler -> render.
-        # Replaces EDL + assembly; the earlier stages still run for metadata/storage.
+        # Replaces EDL + assembly; the legacy perception stages are skipped (grid_only).
         # ==================================================================
         if settings.enable_word_grid_compiler:
             check_cancelled()
@@ -484,12 +489,21 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
                 except Exception as e:          # never fail the job: fall back to the cleaned edit in source order
                     logger.warning(f"[STORYPLAN] job {job_id}: story plan failed, using source order: {e}", exc_info=True)
                     story_warnings.append(f"Story plan failed ({e}); edit kept in recording order.")
-            safe_broadcast("assembling", 85, "Compiling and rendering the edit...")
-            timeline, render_info = compile_and_render(plan, word_grid, envs, file_map, final_video_path)
+            overlay_planner = None
+            if settings.enable_broll:           # Phase 10: B-roll over voice-over, planned on the compiled timeline
+                from app.tasks.broll import plan_overlays
+                broll_files = [{"filename": f["filename"], "path": file_map[f["filename"]],
+                                "audio_only": bool(f.get("audio_only"))} for f in files_info]
+                overlay_planner = lambda tl: plan_overlays(tl, word_grid, broll_files, moments_result)
+                safe_broadcast("assembling", 85, "Choosing B-roll for the voice-over, then rendering...")
+            else:
+                safe_broadcast("assembling", 85, "Compiling and rendering the edit...")
+            timeline, render_info = compile_and_render(plan, word_grid, envs, file_map, final_video_path,
+                                                       overlay_planner=overlay_planner)
             job_warnings = [
                 "Word-grid edit: speech only; B-roll and target duration "
                 f"({target_duration}s) are not applied yet (output {timeline.duration_sec:.1f}s).",
-            ]
+            ] if overlay_planner is None else []
             if settings.enable_edit_passes:
                 n_review = sum(1 for r in ranges if r["label"] == "remove" and r.get("review"))
                 n_sug = sum(1 for r in ranges if r["label"] == "suggest")
@@ -500,6 +514,14 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
                 review = [r for r in ranges if r["label"] == REVIEW]
                 job_warnings += [f"Review take at {r['start']:.1f}-{r['end']:.1f}s ({len(r['by']['alternatives'])} other "
                                  f"clean take(s)): \"{r['text'][:60]}\"" for r in review]
+            if render_info.get("broll") is not None:
+                job_warnings += render_info["broll"]["warnings"]
+                artifacts_mod.save_job(job_id, "broll", render_info["broll"])
+            vo_files = {f["filename"] for f in files_info if f.get("audio_only")}
+            vo_sec = sum(s.src_out - s.src_in for s in timeline.segments if s.source_file in vo_files)
+            if vo_sec and render_info.get("broll") is None:
+                job_warnings.append(f"Voice-over: {vo_sec:.1f}s of the edit come from audio-only files and show a black "
+                                    "picture until B-roll is placed over them.")
             if render_info["validation"]["status"] != "pass":
                 job_warnings.append(f"Validation {render_info['validation']['status']}: " + ", ".join(
                     f"{c['check']} (segment {c['segment']})" for c in render_info["validation"]["checks"]
@@ -516,7 +538,8 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
                                          "validation": render_info["validation"]})
             # Phase 5: persist what a later re-compile needs (survives a restart)
             save_job_edit(job_id, word_grid, [{"filename": f["filename"], "path": file_map[f["filename"]],
-                                               "audio_path": f["audio_path"]} for f in files_info],
+                                               "audio_path": f["audio_path"], "audio_only": bool(f.get("audio_only"))}
+                                              for f in files_info],
                           plan, timeline, render_info, cleanup_ranges=ranges)
             job_story_note = story_warnings
             if story is not None:
@@ -605,25 +628,26 @@ def run_pipeline_sync(job_id: str, video_paths: List[str], context_text: str, ta
                 logger.warning(f"Failed to clean up CFR directory {cfr_dir}: {cleanup_err}")
 
         # ---- Stage 7.5: Metadata Generation (M5) ----
+        # Word-grid jobs: the publish panel writes its own post copy (publish_copy.py).
         check_cancelled()
-        safe_broadcast("metadata_generating", 92, "Generating YouTube metadata (title, description, tags, chapters)...")
-
-        try:
-            metadata = generate_metadata(
-                context_summary=context_summary,
-                transcript_segments=full_transcript_segments,
-                edl=edl,
-                target_duration=target_duration,
-                user_prompt=context_text,
-            )
-            jobs_data_db[job_id]["metadata"] = metadata
-            if job_id in jobs_db:
-                from app.models import VideoMetadata
-                jobs_db[job_id].metadata = VideoMetadata(**metadata)
-            logger.info(f"M5 metadata generated for job {job_id}.")
-        except Exception as meta_err:
-            logger.warning(f"Metadata generation failed (non-fatal): {meta_err}")
-            # Non-fatal — video is still ready, just without metadata
+        if not grid_only:
+            safe_broadcast("metadata_generating", 92, "Generating YouTube metadata (title, description, tags, chapters)...")
+            try:
+                metadata = generate_metadata(
+                    context_summary=context_summary,
+                    transcript_segments=full_transcript_segments,
+                    edl=edl,
+                    target_duration=target_duration,
+                    user_prompt=context_text,
+                )
+                jobs_data_db[job_id]["metadata"] = metadata
+                if job_id in jobs_db:
+                    from app.models import VideoMetadata
+                    jobs_db[job_id].metadata = VideoMetadata(**metadata)
+                logger.info(f"M5 metadata generated for job {job_id}.")
+            except Exception as meta_err:
+                logger.warning(f"Metadata generation failed (non-fatal): {meta_err}")
+                # Non-fatal — video is still ready, just without metadata
 
         # ---- Stage 8: Complete ----
         download_url = f"/api/jobs/{job_id}/download"
