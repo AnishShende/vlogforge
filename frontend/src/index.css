@@ -1789,6 +1789,17 @@ select.input-field option {
 .re-table tbody tr:hover { background: rgba(255,255,255,0.03); }
 .re-table tbody tr.active { background: rgba(109,40,217,0.15); }
 
+.re-split { position: relative; touch-action: none; }
+.re-split.col { cursor: col-resize; }
+.re-split.row { cursor: row-resize; }
+.re-split::after {
+  content: ''; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  border-radius: 2px; background: #333; transition: background 0.15s ease;
+}
+.re-split.col::after { width: 4px; height: 40px; }
+.re-split.row::after { width: 40px; height: 4px; }
+.re-split:hover::after, .re-split.dragging::after { background: var(--primary); }
+
 .re-item { display: flex; gap: 0.75rem; align-items: flex-start; padding: 0.65rem 0.25rem; border-bottom: 1px solid #2a2a2a; }
 
 .re-scroll::-webkit-scrollbar, .tl-scroll::-webkit-scrollbar { height: 8px; width: 8px; }
@@ -1836,6 +1847,19 @@ select.input-field option {
 .pp-layout { cursor: pointer; transition: border-color 0.15s ease, box-shadow 0.15s ease; }
 .pp-layout:hover { border-color: #4a4a4a; }
 .pp-layout.previewing { box-shadow: 0 0 0 2px var(--secondary); }
+/* Caption style picker: each button hints at its preset (app/tasks/subtitles.py STYLES) */
+/* Live caption overlay (CaptionOverlay.jsx): the Bold preset's pop-in, like the ASS \t scale in the export */
+@keyframes vf-cc-pop { from { transform: scale(0.8); } to { transform: scale(1); } }
+.vf-cc-pop { animation: vf-cc-pop 90ms ease-out; }
+.vf-cc-box { position: relative; display: inline-block; max-width: 100%; pointer-events: auto; cursor: move; touch-action: none; user-select: none; outline: 1px dashed transparent; outline-offset: 4px; border-radius: 2px; }
+.vf-cc-box:hover, .vf-cc-box.dragging { outline-color: rgba(255,255,255,0.7); }
+.vf-cc-handle { position: absolute; top: -10px; right: -10px; width: 12px; height: 12px; border-radius: 50%; background: #fff; border: 2px solid var(--primary); cursor: nesw-resize; opacity: 0; }
+.vf-cc-box:hover .vf-cc-handle, .vf-cc-box.dragging .vf-cc-handle { opacity: 1; }
+.pp-cc.active { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary); }
+.pp-cc-clean { font-family: Arial, sans-serif; font-weight: 700; color: #fff; text-shadow: 0 0 2px #000, 0 0 2px #000; }
+.pp-cc-bold { font-family: 'Arial Black', Arial, sans-serif; font-weight: 900; text-transform: uppercase; color: #ffe14d; text-shadow: 0 0 3px #000, 0 0 3px #000; }
+.pp-cc-boxed { font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 700; color: #fff; background: rgba(0,0,0,0.7); }
+.pp-cc-cinema { font-family: Georgia, serif; font-style: italic; color: #f5f0e6; }
 .tl-handle { position: absolute; top: 0; bottom: 0; width: 8px; cursor: ew-resize; z-index: 2; }
 .tl-handle.in { left: 0; }
 .tl-handle.out { right: 0; }

@@ -1,36 +1,28 @@
 import os
-import uuid
 import logging
-import shutil
-from typing import List, Optional
+from typing import Optional
 from datetime import datetime
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect, Depends
+from fastapi import FastAPI, Form, HTTPException, WebSocket, WebSocketDisconnect, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 load_dotenv()
 from app.config import settings
-import asyncio
-from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from app.models import JobStatus, VideoFileInfo, EDLEntry, EditPlan
+from app.models import JobStatus, VideoFileInfo, EditPlan
 from app.db_models import VideoFile, Project
 from app.database import get_db
 from app.tasks.orchestrator import (
     jobs_db,
-    jobs_data_db,
     get_job,
-    get_job_data,
     register_websocket,
     unregister_websocket,
     start_pipeline,
     broadcast_progress,
     cancel_job,
-    start_re_reasoning,
     start_recompile,
 )
-from app.tasks.assemble import assemble_vlog
 from app.utils.interaction_logger import interaction_logger
 
 # Initialize global stdout logger
@@ -73,26 +65,22 @@ app.add_middleware(
 
 @app.get("/")
 def read_root():
-    return {"message": "Welcome to the VlogForge AI-Powered Vlog Creation API!", "version": "2.0.0-phase0"}
+    return {"message": "Welcome to the VlogForge AI-Powered Vlog Creation API!", "version": "2.0.0"}
 
 @app.post("/api/jobs", response_model=JobStatus)
 async def create_job(
     project_id: str = Form(...),
     context_text: Optional[str] = Form(""),
-    vlog_genre: Optional[str] = Form("default"),
     target_duration: Optional[float] = Form(10.0),
-    quality_threshold: Optional[float] = Form(0.35),
     db: AsyncSession = Depends(get_db)
 ):
     """Create a new editing job. Kicks off background execution using Tus-uploaded files."""
     job_id = project_id # Use project_id as job_id for simplicity in M0
-    logger.info(f"Creating job {job_id} for project {project_id}, genre: {vlog_genre}...")
+    logger.info(f"Creating job {job_id} for project {project_id}...")
     interaction_logger.log_interaction("create_job", {
         "job_id": job_id,
         "project_id": project_id,
-        "vlog_genre": vlog_genre,
         "target_duration": target_duration,
-        "quality_threshold": quality_threshold
     })
 
     # Fetch files from DB
@@ -124,12 +112,9 @@ async def create_job(
         message="Job created. Ready to ingest.",
         files=files_info,
         context_text=context_text,
-        vlog_genre=vlog_genre,
         target_duration=target_duration,
-        quality_threshold=quality_threshold,
         created_at=datetime.utcnow(),
         warnings=[],
-        llm_mode="mocked" if getattr(settings, "enable_mock_llm", False) else "real"
     )
     # Update Project in Postgres with settings and processing status
     project_result = await db.execute(select(Project).where(Project.id == project_id))
@@ -138,16 +123,14 @@ async def create_job(
         project.status = "processing"
         project.settings = {
             "context_text": context_text,
-            "vlog_genre": vlog_genre,
             "target_duration": target_duration,
-            "quality_threshold": quality_threshold
         }
         await db.commit()
 
     jobs_db[job_id] = job_status
 
     # Start the async pipeline orchestrator
-    await start_pipeline(job_id, saved_file_paths, context_text, target_duration, vlog_genre, quality_threshold)
+    await start_pipeline(job_id, saved_file_paths, context_text, target_duration)
 
     return job_status
 
@@ -180,59 +163,6 @@ async def cancel_job_endpoint(job_id: str, db: AsyncSession = Depends(get_db)):
 
     return {"status": "cancelled", "message": "Cancellation request received."}
 
-@app.get("/api/jobs/{job_id}/transcript")
-def get_job_transcript(job_id: str):
-    """Retrieve full transcript / EGT segments with classification labels."""
-    job_data = get_job_data(job_id)
-    if not job_data or "transcript" not in job_data:
-        raise HTTPException(status_code=404, detail="Transcript data not available for this job yet.")
-    return {
-        "job_id": job_id,
-        "transcript": job_data["transcript"],
-        "context_document": job_data.get("context_document", "")
-    }
-
-@app.get("/api/jobs/{job_id}/egt")
-def get_job_egt(job_id: str):
-    """Retrieve the full Editorial Ground Truth (EGT) document.
-
-    The EGT is the canonical, inspectable perception output — every segment
-    with its clip_id, quality_score, quality_flags, segment_type, and tags.
-    """
-    job_data = get_job_data(job_id)
-    if not job_data or "egt" not in job_data:
-        raise HTTPException(status_code=404, detail="EGT data not available for this job yet.")
-    return {
-        "job_id": job_id,
-        "egt": job_data["egt"]
-    }
-
-@app.get("/api/jobs/{job_id}/edl")
-def get_job_edl(job_id: str):
-    """Retrieve the Edit Decision List (EDL) JSON."""
-    job_data = get_job_data(job_id)
-    if not job_data or "edl" not in job_data:
-        raise HTTPException(status_code=404, detail="EDL data not available for this job yet.")
-    return {
-        "job_id": job_id,
-        "edl": job_data["edl"]
-    }
-
-@app.get("/api/jobs/{job_id}/metadata")
-def get_job_metadata(job_id: str):
-    """Retrieve AI-generated YouTube metadata (M5).
-
-    Returns title, description, tags, and chapter markers generated
-    by the metadata pipeline stage after video assembly.
-    """
-    job_data = get_job_data(job_id)
-    if not job_data or "metadata" not in job_data:
-        raise HTTPException(status_code=404, detail="Metadata not available for this job yet.")
-    return {
-        "job_id": job_id,
-        "metadata": job_data["metadata"]
-    }
-
 @app.get("/api/jobs/{job_id}/download")
 def download_vlog(job_id: str):
     """Download the final processed vlog MP4."""
@@ -254,122 +184,19 @@ def download_vlog(job_id: str):
     )
 
 
-class ReRenderRequest(BaseModel):
-    edl: List[dict]  # Accepts both legacy and new EDL formats
-
-class ReReasonRequest(BaseModel):
-    quality_threshold: float = 0.35
-
-
 @app.get("/api/jobs/{job_id}/raw/{filename}")
 def get_raw_video(job_id: str, filename: str):
     """Serve raw uploaded video files."""
     raw_video_path = os.path.join(settings.upload_dir, job_id, "raw", filename)
     if not os.path.exists(raw_video_path):
         raise HTTPException(status_code=404, detail="Raw video file not found.")
+    import mimetypes                           # voice-over uploads are audio (.m4a / .mp3 / .wav / .aac)
     return FileResponse(
         path=raw_video_path,
-        media_type="video/mp4",
+        media_type={".m4a": "audio/mp4", ".aac": "audio/aac", ".wav": "audio/wav", ".mp3": "audio/mpeg"}.get(
+            os.path.splitext(filename)[1].lower()) or mimetypes.guess_type(filename)[0] or "video/mp4",
         filename=filename
     )
-
-@app.post("/api/jobs/{job_id}/re-render")
-async def re_render_job(job_id: str, request: ReRenderRequest):
-    """Re-assemble the vlog using a modified Edit Decision List (EDL).
-
-    This only re-runs Pass 3 (mechanical assembly) — never re-triggers
-    Pass 1 (perception) or Pass 2 (reasoning). Fast iteration.
-    """
-    job = get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-
-    interaction_logger.log_interaction("re_render_job", {"job_id": job_id, "edl_items_count": len(request.edl)})
-
-    job_dir = os.path.join(settings.upload_dir, job_id)
-    final_video_name = f"{job_id}.mp4"
-    final_video_path = os.path.join(settings.output_dir, final_video_name)
-
-    # Update EDL in job data store
-    job_data = get_job_data(job_id)
-    if not job_data:
-        jobs_data_db[job_id] = {}
-        job_data = jobs_data_db[job_id]
-
-    # Store the new EDL items
-    new_edl = request.edl
-    job_data["edl"] = new_edl
-
-    # Get EGT clip_ids for validation (if EGT available)
-    egt_clip_ids = None
-    if "egt" in job_data and "segments" in job_data["egt"]:
-        egt_clip_ids = {seg["clip_id"] for seg in job_data["egt"]["segments"]}
-
-    # Update job state and broadcast re-assembling status
-    await broadcast_progress(
-        job_id,
-        "assembling",
-        90,
-        "Re-assembling video clips with FFmpeg..."
-    )
-
-    # Execute the assembly task in a thread pool
-    try:
-        files_info = [f.model_dump() for f in job.files]
-
-        loop = asyncio.get_running_loop()
-        success = await loop.run_in_executor(
-            None,
-            assemble_vlog,
-            new_edl,
-            files_info,
-            job_dir,
-            final_video_path,
-            egt_clip_ids,
-        )
-
-        if not success:
-            await broadcast_progress(job_id, "failed", 0, "Re-assembly failed.")
-            raise HTTPException(status_code=500, detail="FFmpeg vlog assembly failed.")
-
-        download_url = f"/api/jobs/{job_id}/download"
-        await broadcast_progress(
-            job_id,
-            "complete",
-            100,
-            "Vlog re-rendered successfully!",
-            download_url=download_url
-        )
-
-        return {
-            "status": "complete",
-            "download_url": download_url
-        }
-    except Exception as e:
-        logger.error(f"Re-render failed for job {job_id}: {e}", exc_info=True)
-        await broadcast_progress(job_id, "failed", 0, f"Re-render error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Re-render failed: {str(e)}")
-
-@app.post("/api/jobs/{job_id}/re-reason")
-async def re_reason_job_endpoint(job_id: str, request: ReReasonRequest):
-    """Re-run the Pass 2 LLM Reasoning step with a new quality threshold.
-    
-    This avoids re-running the expensive Pass 1 perception. It recalculates the 
-    `is_bad_take` flags in the EGT based on the new threshold, and then generates 
-    a new EDL using the LLM.
-    """
-    job = get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-
-    interaction_logger.log_interaction("re_reason_job", {"job_id": job_id, "new_quality_threshold": request.quality_threshold})
-
-    job.quality_threshold = request.quality_threshold
-
-    # Trigger re-reasoning pipeline
-    await start_re_reasoning(job_id, request.quality_threshold)
-
-    return {"status": "re-reasoning", "message": "Re-reasoning job started."}
 
 @app.get("/api/jobs/{job_id}/edit")
 def get_job_edit(job_id: str):
@@ -406,38 +233,84 @@ def export_job_edit(job_id: str, fmt: str, name: Optional[str] = None):
     return Response(content=body, media_type="application/xml" if fmt == "fcpxml" else "text/plain",
                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
+def _caption_style(captions: Optional[str]) -> Optional[str]:
+    """Query value -> caption preset key (None = no captions); 400 for an unknown preset."""
+    from app.tasks.subtitles import STYLES
+    if not captions or captions == "off":
+        return None
+    if captions not in STYLES:
+        raise HTTPException(status_code=400, detail=f"Unknown caption style: {captions}")
+    return captions
+
+@app.get("/api/jobs/{job_id}/captions")
+def get_job_captions(job_id: str):
+    """Caption blocks of the last render (output clock, the ones burned in on export) and the style presets,
+    for the editor's live caption overlay."""
+    from app.tasks import subtitles
+    cues = subtitles.job_cues(job_id)
+    if cues is None:
+        raise HTTPException(status_code=404, detail="No stored render with a word grid for this job")
+    return {"block_sec": subtitles.BLOCK_SEC, "cues": cues, "styles": subtitles.STYLES,
+            "portrait_margin_v": subtitles.PORTRAIT_MARGIN_V, "side_margin": subtitles.SIDE_MARGIN,
+            "scale_range": subtitles.SCALE_RANGE, "placement": subtitles.job_placement(job_id)}
+
+@app.put("/api/jobs/{job_id}/captions/placement")
+def put_caption_placement(job_id: str, placement: dict):
+    """Where captions sit and how big (moved / resized in the editor): {scale, x, y}; x / y null = the
+    preset's place. Applies to the live overlay and to every captioned export (those made before go stale)."""
+    from app.tasks import subtitles
+    if subtitles.job_cues(job_id) is None:
+        raise HTTPException(status_code=404, detail="No stored render with a word grid for this job")
+    try:
+        saved = subtitles.save_placement(job_id, placement)
+    except (TypeError, ValueError, KeyError) as e:
+        raise HTTPException(status_code=400, detail=f"Bad placement: {e}")
+    interaction_logger.log_interaction("caption_placement", {"job_id": job_id, **saved})
+    return saved
+
 @app.get("/api/jobs/{job_id}/layouts")
-def get_job_layouts(job_id: str):
-    """Export layouts (16:9, 9:16, 1:1, 4:5) of the last render, each with its status."""
+def get_job_layouts(job_id: str, captions: Optional[str] = None):
+    """Export layouts (16:9, 9:16, 1:1, 4:5) of the last render, each with its status; with ?captions=<preset>,
+    the statuses of the files with burned-in captions in that preset."""
     from app.tasks.layouts import list_layouts, source_dims
+    from app.tasks.subtitles import BLOCK_SEC, STYLES
     from app.utils.ffmpeg import RENDER_SIZE
-    rows = list_layouts(job_id)
+    try:
+        rows = list_layouts(job_id, _caption_style(captions))
+    except ValueError as e:                       # e.g. captions asked for a job without a word grid
+        raise HTTPException(status_code=400, detail=str(e))
     if rows is None:
         raise HTTPException(status_code=404, detail="No stored render for this job")
-    return {"layouts": rows, "main_size": list(RENDER_SIZE), "sources": source_dims(job_id)}
+    return {"layouts": rows, "main_size": list(RENDER_SIZE), "sources": source_dims(job_id),
+            "caption_styles": [{"key": k, "name": v["name"], "description": v["description"]} for k, v in STYLES.items()],
+            "caption_block_sec": BLOCK_SEC}
 
 @app.post("/api/jobs/{job_id}/layouts/{key}/render")
-def render_job_layout(job_id: str, key: str):
-    """Render the last render's edit in another frame shape (background; poll GET .../layouts)."""
+def render_job_layout(job_id: str, key: str, captions: Optional[str] = None):
+    """Render the last render's edit in another frame shape, or any shape with burned-in captions
+    (?captions=<preset>) (background; poll GET .../layouts)."""
     from app.tasks.layouts import LAYOUTS, MAIN, list_layouts, start_render
-    if key not in LAYOUTS or key == MAIN:
+    style = _caption_style(captions)
+    if key not in LAYOUTS or (key == MAIN and not style):
         raise HTTPException(status_code=400, detail=f"Unknown or main layout: {key}")
     if list_layouts(job_id) is None:
         raise HTTPException(status_code=404, detail="No stored render for this job")
-    started = start_render(job_id, key)
-    interaction_logger.log_interaction("render_layout", {"job_id": job_id, "layout": key, "started": started})
+    started = start_render(job_id, key, style)
+    interaction_logger.log_interaction("render_layout", {"job_id": job_id, "layout": key, "captions": style, "started": started})
     return {"status": "rendering", "started": started}
 
 @app.get("/api/jobs/{job_id}/layouts/{key}/download")
-def download_job_layout(job_id: str, key: str):
-    """Download a rendered layout MP4."""
+def download_job_layout(job_id: str, key: str, captions: Optional[str] = None):
+    """Download a rendered layout MP4 (?captions=<preset>: the captioned file)."""
     from app.tasks.layouts import LAYOUTS, layout_path
     if key not in LAYOUTS:
         raise HTTPException(status_code=400, detail=f"Unknown layout: {key}")
-    path = layout_path(job_id, key)
+    style = _caption_style(captions)
+    path = layout_path(job_id, key, style)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="This layout has not been rendered yet.")
-    return FileResponse(path=path, media_type="video/mp4", filename=f"vlogforge_{job_id[:8]}_{LAYOUTS[key]['ratio'].replace(':', 'x')}.mp4")
+    return FileResponse(path=path, media_type="video/mp4",
+                        filename=f"vlogforge_{job_id[:8]}_{LAYOUTS[key]['ratio'].replace(':', 'x')}{'_captions-' + style if style else ''}.mp4")
 
 @app.get("/api/jobs/{job_id}/publish")
 def get_publish_copy(job_id: str, format: str = "auto", regenerate: bool = False):

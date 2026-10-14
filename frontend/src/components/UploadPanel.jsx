@@ -1,8 +1,12 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useDropzone } from 'react-dropzone';
-import { UploadCloud, FileVideo, X, FolderOpen, Info, Clock, HardDrive } from 'lucide-react';
+import { UploadCloud, FileVideo, FileAudio, X, FolderOpen, Info, Clock, HardDrive } from 'lucide-react';
 
 // Utility: read video duration from a File blob
+// Voice-over recordings (audio only) are uploaded next to the clips; their picture comes from B-roll.
+const VIDEO_EXTS = ['mp4', 'mov', 'avi', 'mkv'];
+const AUDIO_EXTS = ['m4a', 'mp3', 'wav', 'aac'];
+
 function getVideoDuration(file) {
   return new Promise((resolve) => {
     const video = document.createElement('video');
@@ -40,11 +44,11 @@ export default function UploadPanel({ files, setFiles, isSubmitting, onRemoveFil
   const onDrop = useCallback(async (acceptedFiles) => {
     const videos = acceptedFiles.filter((file) => {
       const ext = file.name.split('.').pop().toLowerCase();
-      return ['mp4', 'mov', 'avi', 'mkv'].includes(ext);
+      return [...VIDEO_EXTS, ...AUDIO_EXTS].includes(ext);
     });
 
     if (videos.length === 0) {
-      alert('Please upload valid video formats (.mp4, .mov, .avi, or .mkv).');
+      alert('Please upload videos (.mp4, .mov, .avi, .mkv) or voice-over audio (.m4a, .mp3, .wav, .aac).');
       return;
     }
 
@@ -68,7 +72,7 @@ export default function UploadPanel({ files, setFiles, isSubmitting, onRemoveFil
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
-    accept: { 'video/*': ['.mp4', '.mov', '.avi', '.mkv'] }
+    accept: { 'video/*': VIDEO_EXTS.map((e) => `.${e}`), 'audio/*': AUDIO_EXTS.map((e) => `.${e}`) }
   });
 
   const removeFile = (index) => {
@@ -116,7 +120,7 @@ export default function UploadPanel({ files, setFiles, isSubmitting, onRemoveFil
         <h3 style={{ margin: 0, fontSize: '1.15rem', letterSpacing: '0.03em', fontFamily: 'Outfit, sans-serif', color: 'var(--text-main)' }}>Footage Assets</h3>
       </div>
       <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', margin: '0 0 1.25rem 0', lineHeight: 1.4 }}>
-        Drop your raw footage. Each clip's duration and size will be analyzed.
+        Drop your raw footage and any voice-over recordings (audio only). Each file's duration and size will be analyzed.
       </p>
 
       {/* Dropzone */}
@@ -126,10 +130,10 @@ export default function UploadPanel({ files, setFiles, isSubmitting, onRemoveFil
           <UploadCloud size={22} />
         </div>
         {isDragActive ? (
-          <p style={{ fontWeight: 600, color: 'var(--primary)', fontSize: '0.85rem', margin: 0 }}>Drop videos here...</p>
+          <p style={{ fontWeight: 600, color: 'var(--primary)', fontSize: '0.85rem', margin: 0 }}>Drop files here...</p>
         ) : (
           <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: 0 }}>
-            Drag videos here, or <span style={{ color: 'var(--primary)', fontWeight: 600 }}>browse files</span>
+            Drag videos or voice-over audio here, or <span style={{ color: 'var(--primary)', fontWeight: 600 }}>browse files</span>
           </p>
         )}
       </div>
@@ -174,7 +178,9 @@ export default function UploadPanel({ files, setFiles, isSubmitting, onRemoveFil
             {files.map((file, idx) => (
               <div key={idx} className="file-item" style={{ padding: '0.6rem 0.85rem', fontSize: '0.8rem' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flex: 1, minWidth: 0 }}>
-                  <FileVideo size={14} style={{ color: 'var(--primary)', flexShrink: 0 }} />
+                  {AUDIO_EXTS.includes(file.name.split('.').pop().toLowerCase())
+                    ? <FileAudio size={14} style={{ color: 'var(--primary)', flexShrink: 0 }} />
+                    : <FileVideo size={14} style={{ color: 'var(--primary)', flexShrink: 0 }} />}
                   <div style={{ minWidth: 0, flex: 1 }}>
                     <div className="file-name" style={{ fontSize: '0.8rem' }}>{file.name}</div>
                     <div style={{ display: 'flex', gap: '0.75rem', marginTop: '0.15rem' }}>

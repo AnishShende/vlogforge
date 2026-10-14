@@ -14,17 +14,17 @@ dependencies:
       - pydantic-settings
       - python-dotenv
       - faster-whisper
-      - google-genai
-      - pillow
-      - scenedetect[opencv]
+      - whisperx                 # forced word alignment (pulls in torch)
+      - anthropic                # edit passes, story plan, post copy
+      - pillow                   # B-roll shot thumbnails
+      - scenedetect[opencv]      # B-roll shot index (ENABLE_BROLL, off in the MVP)
       - opencv-python-headless
       - pytest
-      # M0 Dependencies
+      # Database + auth
       - sqlalchemy
       - alembic
       - asyncpg
       - psycopg2-binary
       - passlib[bcrypt]
       - python-jose[cryptography]
-      - typesafe-sdk
 

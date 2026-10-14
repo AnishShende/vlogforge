@@ -31,10 +31,11 @@ from app.config import settings
 from app.models import WordGrid
 from app.tasks.edit_passes import attempts_of
 from app.utils import artifacts
+from app.utils.llm import claude_client
 
 logger = logging.getLogger("VlogForge.Moments")
 
-PROMPT_VERSION = "3"
+PROMPT_VERSION = "4"
 MODEL = "claude-sonnet-5-5"
 FUNCTIONS = ["hook", "orientation", "goal", "activity", "explanation", "progress", "obstacle", "discovery",
              "evidence", "reaction", "transition", "atmosphere", "payoff", "reflection", "conclusion"]
@@ -45,8 +46,11 @@ camera. You get the transcript of the FINISHED edit (retakes and false starts al
 clip, as numbered lines; every word carries a global index like [57]word. Each clip header gives the
 clip's recording time, or "unknown" when the camera stored none. The clips are listed by recording time
 when every clip has one, otherwise in upload order; either way this is NOT necessarily the story order
-(creators often film a welcome, a sign-off or a link between parts at another time). Speech recognition
-errors are common; the speech may be in any language or a mix (for example Hindi and English).
+(creators often film a welcome, a sign-off or a link between parts at another time). A header marked
+VOICE-OVER is narration recorded without picture (footage is laid over it later): give it the role,
+section and place its CONTENT belongs to, like any other speech; it is not an intro or outro just because
+it was recorded separately. Speech recognition errors are common; the speech may be in any language or a
+mix (for example Hindi and English).
 
 Split the transcript into MOMENTS: consecutive stretches that each do one job in the story (one beat:
 a point, a step, a reaction). A moment is usually one to four sentences. List the moments in
@@ -126,7 +130,7 @@ def _call(system: str, user: str) -> Tuple[Dict, Dict]:
     if hit is not None:
         return hit["out"], {**hit["usage"], "cached": True}
     global _client
-    _client = _client or anthropic.Anthropic(api_key=settings.claude_api_key)
+    _client = _client or claude_client()
     r = _client.beta.messages.create(model=MODEL, max_tokens=16000, system=system,
                                      messages=[{"role": "user", "content": user}],
                                      output_config={"effort": "medium", "format": {"type": "json_schema", "schema": _schema()}},
@@ -143,7 +147,9 @@ def clip_order(files: List[Dict]) -> List[Dict]:
     """files: [{filename, path}] in upload order. Returns [{filename, recorded}] in listing order: by
     recording time when every clip has a real one, else upload order (never by filename)."""
     from app.utils.ffmpeg import recording_time
-    clips = [{"filename": f["filename"], "recorded": recording_time(f["path"])} for f in files]
+    from app.utils.ffmpeg import is_audio_only
+    clips = [{"filename": f["filename"], "recorded": recording_time(f["path"]),
+              "voice_over": is_audio_only(f["path"])} for f in files]
     if clips and all(c["recorded"] for c in clips):
         clips.sort(key=lambda c: datetime.fromisoformat(c["recorded"]))
     elif len(clips) > 1:
@@ -152,22 +158,22 @@ def clip_order(files: List[Dict]) -> List[Dict]:
     return clips
 
 
-def _clip_header(n: int, total: int, recorded: Optional[str]) -> str:
+def _clip_header(n: int, total: int, recorded: Optional[str], voice_over: bool = False) -> str:
     when = datetime.fromisoformat(recorded).strftime("%Y-%m-%d %H:%M:%S (UTC%z)") if recorded else "unknown"
-    return f"=== Clip {n} of {total}, recorded: {when}"
+    return f"=== Clip {n} of {total}, recorded: {when}" + (", VOICE-OVER (audio only, no picture)" if voice_over else "")
 
 
 def render(grid: WordGrid, order: List[int], clips: Optional[List[Dict]] = None) -> str:
     """Kept words as lines (pause / cut breaks), each word with its GLOBAL index in `order`; a header
     line at every clip change (clip number in listing order, recording time) when `clips` is given."""
     W, gi = grid.words, {i: n for n, i in enumerate(order)}
-    rec = {c["filename"]: (n + 1, c["recorded"]) for n, c in enumerate(clips or [])}
+    rec = {c["filename"]: (n + 1, c["recorded"], c.get("voice_over", False)) for n, c in enumerate(clips or [])}
     lines, prev_file = [], None
     for a in sorted(attempts_of(grid, {W[i].id for i in order}), key=lambda a: gi[a[0]]):
         f = W[a[0]].source_file
         if clips and f != prev_file:
-            n, recorded = rec[f]
-            lines.append(_clip_header(n, len(clips), recorded))
+            n, recorded, vo = rec[f]
+            lines.append(_clip_header(n, len(clips), recorded, vo))
         prev_file = f
         t = W[a[0]].start
         lines.append(f"({int(t // 60)}:{t % 60:04.1f}) " + " ".join(f"[{gi[i]}]{W[i].text}" for i in a))
@@ -183,6 +189,16 @@ def _validate(raw: Dict, n_words: int) -> Tuple[Optional[List[Dict]], List[str]]
     notes = []
     ms = raw.get("moments") or []
     starts = [m["start_word"] for m in ms]
+    if ms and len(set(starts)) == len(starts) and any(b < a for a, b in zip(starts, starts[1:])):
+        # listed in story order instead of transcript order: every moment keeps its own start word, so sort
+        # them and renumber the 1-based references between moments (depends_on, announces -> first_moment)
+        perm = sorted(range(len(ms)), key=lambda k: starts[k])
+        new_no = {old + 1: new + 1 for new, old in enumerate(perm)}
+        ms = [{**ms[k], "depends_on": [new_no.get(d, 0) for d in ms[k]["depends_on"]],
+               "announces": [{**a, "first_moment": new_no.get(int(a.get("first_moment") or 0), 0)}
+                             for a in ms[k].get("announces") or []]} for k in perm]
+        notes.append(f"moments listed out of transcript order ({starts[:12]}); re-sorted by start word")
+        starts = [m["start_word"] for m in ms]
     if not ms or starts[0] != 0 or any(b <= a for a, b in zip(starts, starts[1:])) or starts[-1] >= n_words:
         return None, [f"unusable moment starts: {starts[:12]}"]
     out = []

@@ -8,6 +8,7 @@ import os
 import time
 from typing import Dict, List, Optional, Tuple
 
+from app.config import settings
 from app.models import CompiledTimeline, EditPlan, WordGrid
 from app.tasks.compiler import FPS, compile_and_render
 from app.utils import artifacts
@@ -99,7 +100,15 @@ def recompile_job(job_id: str, plan: EditPlan, output_path: str) -> Tuple[Compil
     if missing:
         raise FileNotFoundError(f"job {job_id}: source media gone: {missing}")
     envs = {f["filename"]: envelope(load_audio(f["audio_path"])) for f in files}
-    timeline, info = compile_and_render(plan, grid, envs, {f["filename"]: f["path"] for f in files}, output_path)
+    overlay_planner = None
+    if settings.enable_broll:                  # Phase 10: re-plan B-roll on the new cut (model calls are cached)
+        from app.tasks.broll import plan_overlays
+        moments = artifacts.load_job(job_id, "moments")
+        overlay_planner = lambda tl: plan_overlays(tl, grid, files, moments)
+    timeline, info = compile_and_render(plan, grid, envs, {f["filename"]: f["path"] for f in files}, output_path,
+                                        overlay_planner=overlay_planner)
+    if info.get("broll") is not None:
+        artifacts.save_job(job_id, "broll", info["broll"])
     artifacts.save_job(job_id, "plan", plan.model_dump())
     artifacts.save_job(job_id, "timeline", timeline.model_dump())
     artifacts.save_job(job_id, "validation", info.get("validation"))

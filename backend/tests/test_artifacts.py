@@ -39,7 +39,7 @@ def test_transcription_is_reused_by_content(store, monkeypatch):
     assert transcribe.transcribe_audio(str(a)) == [{"text": "hi", "start": 0, "end": 1}]
     assert transcribe.transcribe_audio(str(b)) == [{"text": "hi", "start": 0, "end": 1}]   # same content: reused
     assert len(calls) == 1
-    monkeypatch.setattr(settings, "enable_word_grid", not settings.enable_word_grid)      # other settings: new run
+    monkeypatch.setattr(settings, "enable_forced_alignment", not settings.enable_forced_alignment)   # other settings: new run
     transcribe.transcribe_audio(str(a))
     assert len(calls) == 2
 

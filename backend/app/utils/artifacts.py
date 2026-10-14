@@ -5,7 +5,7 @@ Two kinds:
   content-keyed   get(stage, key) / put(stage, key, payload): key = hash of the inputs + versions
                   (e.g. transcription: audio CONTENT hash + model + settings). Shared across jobs.
   per job         save_job / load_job(job_id, name): the job's grid, plan, timeline, ... so the
-                  job can be re-compiled after a restart (jobs_data_db is in memory only).
+                  job can be re-compiled after a restart (job status is in memory only).
 
 Files on disk under settings.artifact_dir (user decision 2026-10-06), behind this small
 interface so it can move to Postgres later. Writes are atomic (tmp + rename). Every hit and

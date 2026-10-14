@@ -1,12 +1,12 @@
 """Recover speech the first ASR pass skipped (Archdoc roadmap Phase 1 / S5, candidate E).
 
-Whole-file Whisper silently drops repeated attempts and stutters (IMG_1614: 33% of
-labelled speech had no words). Transcribed on its own, a skipped stretch comes back.
+Whole-file Whisper silently drops repeated attempts and stutters (on a stutter-heavy
+eval clip, 33% of labelled speech had no words). Transcribed on its own, a skipped stretch comes back.
 So after the first pass: find speech (Silero VAD) that no word covers, re-transcribe
 each such stretch alone, keep text that passes Whisper's hallucination guards,
 force-align it on the full audio, and merge the words in flagged `recovered`.
 
-Bake-off (2 clips): missing labelled speech 33% -> 2% (IMG_1614), 12% -> 7% (chai),
+Bake-off (2 eval clips): missing labelled speech 33% -> 2% and 12% -> 7%,
 no extra invented words, boundary p90 5.1 s -> 135 ms / 1.3 s -> 401 ms.
 """
 

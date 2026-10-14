@@ -27,6 +27,7 @@ import anthropic
 from app.config import settings
 from app.tasks.recompile import load_job_edit
 from app.utils import artifacts
+from app.utils.llm import claude_client
 
 logger = logging.getLogger("VlogForge.PublishCopy")
 
@@ -156,7 +157,7 @@ def _call(fmt: str, user: str, variant: int) -> Tuple[Dict, Dict]:
     if hit is not None:
         return hit["out"], {**hit["usage"], "cached": True}
     global _client
-    _client = _client or anthropic.Anthropic(api_key=settings.claude_api_key)
+    _client = _client or claude_client()
     r = _client.beta.messages.create(model=MODEL, max_tokens=8000, system=system,
                                      messages=[{"role": "user", "content": user}],
                                      output_config={"effort": "low", "format": {"type": "json_schema", "schema": _schema(fmt)}},

@@ -3,8 +3,6 @@ import logging
 import threading
 from typing import List, Dict, Optional
 
-from app.models import EGTSegment
-
 logger = logging.getLogger("VlogForge.Transcribe")
 
 _whisper_model = None
@@ -53,8 +51,6 @@ def _forced_align(audio_path: str, segments: List[Dict]) -> Optional[List[Dict]]
         aligned = whisperx.align(
             segs, model_a, metadata, audio, device="cpu", return_char_alignments=False,
         )
-        from app.config import settings
-        keep_untimed = getattr(settings, "enable_word_grid", False)
         out = []
         dropped = 0
         for seg in aligned.get("segments", []):
@@ -63,20 +59,18 @@ def _forced_align(audio_path: str, segments: List[Dict]) -> Optional[List[Dict]]
                 text = str(w.get("word", "")).strip()
                 if w.get("start") is None or w.get("end") is None:
                     dropped += 1
-                    if keep_untimed and text:
+                    if text:
                         seg_words.append({"start": None, "end": None, "text": text})
                     continue
                 entry = {"start": float(w["start"]), "end": float(w["end"]), "text": text}
-                if keep_untimed and w.get("score") is not None:
+                if w.get("score") is not None:
                     entry["conf"] = round(float(w["score"]), 4)
                     entry["conf_src"] = "aligner_score"
                 seg_words.append(entry)
-            if keep_untimed:
-                _interpolate_untimed(seg_words, seg.get("start"), seg.get("end"))
+            _interpolate_untimed(seg_words, seg.get("start"), seg.get("end"))
             out.extend(seg_words)
         if dropped:
-            logger.warning(f"[FORCED-ALIGN] {dropped} word(s) had no aligned time: "
-                           + ("interpolated + flagged" if keep_untimed else "DROPPED (word grid off)"))
+            logger.warning(f"[FORCED-ALIGN] {dropped} word(s) had no aligned time: interpolated + flagged")
         if not out:
             logger.warning("[FORCED-ALIGN] produced no words; keeping raw Whisper times.")
             return None
@@ -118,8 +112,8 @@ def _interpolate_untimed(words: List[Dict], seg_start: Optional[float], seg_end:
 
 
 def _clip_transcriber(model):
-    """Re-transcribe each clip on its own (Archdoc Phase 1 S5). Measured on 40 IMG_1614
-    gaps: one-at-a-time with the file language 129 s; faster-whisper batched clips 343 s
+    """Re-transcribe each clip on its own. Measured on 40 gaps of an eval clip:
+    one-at-a-time with the file language 129 s; faster-whisper batched clips 343 s
     and merged neighbouring clips' text, so not used."""
     from app.tasks.asr_recovery import guarded_text
 
@@ -169,7 +163,7 @@ def get_whisper_model():
                 logger.info("Whisper Model (base) loaded successfully on CPU.")
             return _whisper_model
         except Exception as e:
-            logger.error(f"Failed to load faster-whisper: {e}. Transcription will run in Mock Mode.")
+            logger.error(f"Failed to load faster-whisper: {e}.")
             return None
 
 
@@ -182,8 +176,8 @@ def transcribe_audio(audio_path: str, status_callback=None) -> List[Dict]:
     if getattr(settings, "enable_mock_whisper", False) or not artifacts.enabled() \
             or not audio_path or not os.path.exists(audio_path):
         return _transcribe_audio(audio_path, status_callback)
-    key = artifacts.make_key("transcribe", artifacts.file_digest(audio_path), TRANSCRIBE_VERSION,
-                             bool(getattr(settings, "enable_word_grid", False)),
+    # The True stands for the word-grid flag that used to be part of the key: stored transcripts keep hitting.
+    key = artifacts.make_key("transcribe", artifacts.file_digest(audio_path), TRANSCRIBE_VERSION, True,
                              bool(getattr(settings, "enable_forced_alignment", True)))
     cached = artifacts.get("transcribe", key)
     if cached is not None:
@@ -201,11 +195,9 @@ TRANSCRIBE_VERSION = "faster-whisper-turbo|whisperx-wav2vec2-en|grid-v3|2026-10-
 
 
 def _transcribe_audio(audio_path: str, status_callback=None) -> List[Dict]:
-    """Transcribe an audio file and return segment dictionaries with start, end, text.
-    Uses Gemini 2.5 Flash Speech-to-Text with local Whisper fallback.
+    """Transcribe an audio file with local faster-whisper + WhisperX alignment and return word
+    dictionaries with start, end, text (+ conf, interpolated / recovered flags). Raises if Whisper fails.
     """
-    from app.utils.llm import transcribe_audio_gemini
-
     if not audio_path or not os.path.exists(audio_path):
         return []
 
@@ -216,10 +208,8 @@ def _transcribe_audio(audio_path: str, status_callback=None) -> List[Dict]:
         try:
             stat = os.stat(audio_path)
             filename = os.path.basename(audio_path)
-            # Word grid on => v3 transcripts (temperature 0, conf, interpolated + recovered
-            # words; Archdoc Phase 1 S5). Separate cache so v1 replays (baseline) stay
-            # byte-identical. v2 (no recovery, fallback decoding) is superseded.
-            version = "v3|" if getattr(settings, "enable_word_grid", False) else ""
+            # v3 transcripts: temperature 0, conf, interpolated + recovered words.
+            version = "v3|"
             cache_key = hashlib.sha256(f"{version}{filename}_{stat.st_size}".encode()).hexdigest()
             print(f"[WHISPER CACHE DEBUG] audio_path={audio_path}, size={stat.st_size}, cache_key={cache_key}")
         except Exception as e:
@@ -251,186 +241,80 @@ def _transcribe_audio(audio_path: str, status_callback=None) -> List[Dict]:
     logger.info("Attempting Speech-to-Text using local faster-whisper...")
     model = get_whisper_model()
     
-    if model is not None:
-        try:
-            grid_mode = getattr(settings, "enable_word_grid", False)
-            segments, info = model.transcribe(
-                audio_path,
-                beam_size=5,
-                # word grid: temperature 0 only. Fallback re-decodes repetitive (stutter)
-                # segments by random sampling: non-deterministic, drops attempts (S4).
-                **({"temperature": 0.0} if grid_mode else {}),
-                condition_on_previous_text=False,
-                vad_filter=True,
-                vad_parameters=dict(
-                    min_speech_duration_ms=100,   # Catch short single-syllable trailing words like "Bye!"
-                    min_silence_duration_ms=500,  # Tightly strip silences > 0.5s to expose pure gaps to the pipeline
-                    speech_pad_ms=400             # Ensure start/end syllables aren't chopped off by VAD borders
-                ),
-                word_timestamps=True
-            )
-            transcription_results = []
-            whisper_segments = []   # sentence-level, for forced alignment windows
-            for segment in segments:
-                if segment.text and segment.text.strip():
-                    whisper_segments.append({
-                        "start": segment.start,
-                        "end": segment.end,
-                        "text": segment.text.strip(),
-                    })
-                if segment.words:
-                    for word in segment.words:
-                        entry = {
-                            "start": word.start,
-                            "end": word.end,
-                            "text": word.word.strip()
-                        }
-                        if getattr(settings, "enable_word_grid", False):
-                            entry["conf"] = round(float(word.probability), 4)
-                            entry["conf_src"] = "whisper_probability"
-                        transcription_results.append(entry)
-                else:
-                    transcription_results.append({
-                        "start": segment.start,
-                        "end": segment.end,
-                        "text": segment.text.strip()
-                    })
-
-            logger.info(f"Whisper STT completed with {len(transcription_results)} segments/words.")
-
-            # Forced-alignment refinement (WhisperX / wav2vec2). Whisper's own
-            # word timestamps are coarse (words mis-bucketed by ~1.5s, stretched
-            # tokens), which breaks clean-cut boundaries downstream. Replace them
-            # with forced-aligned times when available. Fail-loud fallback keeps
-            # the raw Whisper words on any error or if whisperx is absent.
-            if getattr(settings, "enable_forced_alignment", False) and whisper_segments:
-                refined = _forced_align(audio_path, whisper_segments)
-                if refined is not None:
-                    transcription_results = refined
-                    # Archdoc Phase 1 S5 (candidate E): re-transcribe speech the first
-                    # pass skipped, in the language it detected, and merge it back.
-                    if grid_mode:
-                        from app.tasks.asr_recovery import recover_skipped_speech
-                        if status_callback:
-                            status_callback("recovering skipped speech")
-                        transcription_results, _stats = recover_skipped_speech(
-                            audio_path, transcription_results, _clip_transcriber(model), _forced_align,
-                            language=getattr(info, "language", None))
-
-            if getattr(settings, "enable_mock_whisper", False):
-                try:
-                    os.makedirs(settings.mock_llm_dir, exist_ok=True)
-                    with open(cache_file, "w") as f:
-                        json.dump(transcription_results, f, indent=2)
-                except Exception as e:
-                    logger.warning(f"Failed to write Whisper cache {cache_file}: {e}")
-                    
-            return transcription_results
-
-        except Exception as e:
-            logger.error(f"Whisper transcription failed: {e}. Falling back to Gemini STT.")
-    else:
-        logger.warning("Local Whisper model unavailable. Falling back to Gemini STT.")
-
-    # Fallback to Gemini 1.5 Flash Lite STT
-    if status_callback:
-        status_callback("Fallback: using Gemini 1.5 Flash Lite STT")
-    logger.info("Attempting Speech-to-Text using Gemini 1.5 Flash Lite...")
-    gemini_result = transcribe_audio_gemini(audio_path)
-    if gemini_result is not None:
-        logger.info(f"Gemini 1.5 Flash Lite STT completed with {len(gemini_result)} segments.")
-        return gemini_result
-
-    # Final fallback
-    logger.warning("All STT methods failed. Falling back to mock transcription.")
-    return _mock_transcribe(audio_path)
-
-
-def align_transcript_with_segments(
-    egt_segments: List[EGTSegment],
-    transcript_segments: List[Dict],
-) -> List[EGTSegment]:
-    """Align word/segment transcripts with EGT segments using a linear two-pointer sweep.
-
-    O(N+M) Two-Pointer Optimisation:
-    Both `egt_segments` (from PySceneDetect) and `transcript_segments` (from Whisper/Gemini)
-    are generated in strict chronological order. Instead of a brute-force O(N×M) nested
-    loop, this uses a two-pointer sweep per video file.
-
-    Writes aligned text into EGTSegment.transcript and sets language_id = "en" (Phase 0).
-    Returns the same list of EGTSegment objects, mutated in place.
-    """
-    if not egt_segments or not transcript_segments:
-        return egt_segments
-
-    # --- Group transcript segments by video_file for O(1) per-file lookup ---
-    segments_by_file: Dict[str, List[Dict]] = {}
-    for seg in transcript_segments:
-        file_key = seg.get("video_file", "")
-        segments_by_file.setdefault(file_key, []).append(seg)
-
-    # Each per-file list is already in chronological order (Whisper/Gemini emit sorted output).
-    # For safety, sort by start time.
-    for file_key in segments_by_file:
-        segments_by_file[file_key].sort(key=lambda s: s["start"])
-
-    # --- Two-pointer sweep per video file ---
-    file_ptr: Dict[str, int] = {k: 0 for k in segments_by_file}
-
-    for egt_seg in egt_segments:
-        scene_start = egt_seg.start_sec
-        scene_end = egt_seg.end_sec
-        scene_file = egt_seg.source_file
-
-        file_segs = segments_by_file.get(scene_file, [])
-        t_ptr = file_ptr.get(scene_file, 0)
-
-        scene_text_pieces = []
-        scene_word_timings = []
-
-        # Advance past segments that end before this scene starts
-        while t_ptr < len(file_segs) and file_segs[t_ptr]["end"] <= scene_start:
-            t_ptr += 1
-
-        # Collect all segments whose midpoint falls within [scene_start, scene_end)
-        collect_ptr = t_ptr
-        while collect_ptr < len(file_segs) and file_segs[collect_ptr]["start"] < scene_end:
-            seg = file_segs[collect_ptr]
-            # Assign transcript to this scene ONLY if its midpoint falls within the scene
-            seg_midpoint = seg["start"] + (seg["end"] - seg["start"]) / 2.0
-            if scene_start <= seg_midpoint < scene_end:
-                scene_text_pieces.append(seg["text"])
-                scene_word_timings.append({
-                    "word": seg["text"],
-                    "start": seg["start"],
-                    "end": seg["end"],
+    if model is None:
+        raise RuntimeError("Local Whisper model unavailable: cannot transcribe (is faster-whisper installed?)")
+    try:
+        segments, info = model.transcribe(
+            audio_path,
+            beam_size=5,
+            # temperature 0 only. Fallback re-decodes repetitive (stutter)
+            # segments by random sampling: non-deterministic, drops attempts.
+            temperature=0.0,
+            condition_on_previous_text=False,
+            vad_filter=True,
+            vad_parameters=dict(
+                min_speech_duration_ms=100,   # Catch short single-syllable trailing words like "Bye!"
+                min_silence_duration_ms=500,  # Tightly strip silences > 0.5s to expose pure gaps to the pipeline
+                speech_pad_ms=400             # Ensure start/end syllables aren't chopped off by VAD borders
+            ),
+            word_timestamps=True
+        )
+        transcription_results = []
+        whisper_segments = []   # sentence-level, for forced alignment windows
+        for segment in segments:
+            if segment.text and segment.text.strip():
+                whisper_segments.append({
+                    "start": segment.start,
+                    "end": segment.end,
+                    "text": segment.text.strip(),
                 })
-            collect_ptr += 1
+            if segment.words:
+                for word in segment.words:
+                    entry = {
+                        "start": word.start,
+                        "end": word.end,
+                        "text": word.word.strip()
+                    }
+                    entry["conf"] = round(float(word.probability), 4)
+                    entry["conf_src"] = "whisper_probability"
+                    transcription_results.append(entry)
+            else:
+                transcription_results.append({
+                    "start": segment.start,
+                    "end": segment.end,
+                    "text": segment.text.strip()
+                })
 
-        # Persist the pointer so the next scene starts its skip from here
-        file_ptr[scene_file] = t_ptr
+        logger.info(f"Whisper STT completed with {len(transcription_results)} segments/words.")
 
-        # Write to EGTSegment fields
-        egt_seg.transcript = " ".join(scene_text_pieces).strip()
-        word_count = len(egt_seg.transcript.split()) if egt_seg.transcript else 0
-        egt_seg.has_speech = word_count >= 3
-        egt_seg.word_timings = scene_word_timings
-        egt_seg.language_id = "en"  # Phase 0: English only
+        # Forced-alignment refinement (WhisperX / wav2vec2). Whisper's own
+        # word timestamps are coarse (words mis-bucketed by ~1.5s, stretched
+        # tokens), which breaks clean-cut boundaries downstream. Replace them
+        # with forced-aligned times when available. Fail-loud fallback keeps
+        # the raw Whisper words on any error or if whisperx is absent.
+        if getattr(settings, "enable_forced_alignment", False) and whisper_segments:
+            refined = _forced_align(audio_path, whisper_segments)
+            if refined is not None:
+                transcription_results = refined
+                # Re-transcribe speech the first pass skipped, in the language it
+                # detected, and merge it back.
+                from app.tasks.asr_recovery import recover_skipped_speech
+                if status_callback:
+                    status_callback("recovering skipped speech")
+                transcription_results, _stats = recover_skipped_speech(
+                    audio_path, transcription_results, _clip_transcriber(model), _forced_align,
+                    language=getattr(info, "language", None))
 
-    return egt_segments
+        if getattr(settings, "enable_mock_whisper", False):
+            try:
+                os.makedirs(settings.mock_llm_dir, exist_ok=True)
+                with open(cache_file, "w") as f:
+                    json.dump(transcription_results, f, indent=2)
+            except Exception as e:
+                logger.warning(f"Failed to write Whisper cache {cache_file}: {e}")
+                
+        return transcription_results
 
-
-def _mock_transcribe(audio_path: str) -> List[Dict]:
-    """Generate dummy transcript segments for offline testing."""
-    filename = os.path.basename(audio_path)
-    logger.info(f"Running mock transcription for {filename}")
-
-    # We yield standard greetings, mid-sections, and goodbyes spaced out
-    return [
-        {"start": 0.0, "end": 4.0, "text": "Hey guys, welcome back to my channel! Today we are exploring some amazing spots."},
-        {"start": 4.5, "end": 12.0, "text": "This is going to be an awesome vlog. I'm currently setting up the camera and getting ready for the day."},
-        {"start": 15.0, "end": 28.0, "text": "Look at this incredible view! The lighting is absolutely perfect right now."},
-        {"start": 30.0, "end": 45.0, "text": "Just walking down the street, showing you guys around. This city is beautiful."},
-        {"start": 50.0, "end": 58.0, "text": "Okay, that's pretty much everything for this stop. Let's move on to the next location."},
-        {"start": 60.0, "end": 75.0, "text": "Alright, that is it for today's video. If you enjoyed it, make sure to hit that subscribe button, and I'll see you next time. Peace!"}
-    ]
+    except Exception as e:
+        logger.error(f"Whisper transcription failed: {e}")
+        raise RuntimeError(f"Whisper transcription failed for {os.path.basename(audio_path)}: {e}") from e

@@ -4,8 +4,7 @@ Turns the per-file transcript word list (Whisper + forced alignment) into a
 WordGrid: one Word per spoken word, deterministic IDs, per-file time order.
 Edits will reference these IDs instead of segment clip_ids.
 
-Built straight from the transcript, not from EGT segments: segments are a
-derived view and split words across scene boundaries.
+Built straight from the transcript, so no word is ever split across a cut.
 """
 
 import logging
@@ -19,7 +18,7 @@ from app.utils.speech_activity import Envelope, possible_speech, snap_end, snap_
 logger = logging.getLogger("VlogForge.WordGrid")
 
 # Speech-activity checks (Phase 1 / S3). Heuristics, chosen from the eval set's real
-# distributions and documented in docs/ARCHDOC_ROADMAP.md; the ASR bake-off may revise.
+# distributions; the ASR bake-off may revise.
 EDGE_REFINE_SEC = 0.04          # word edges move at most this far toward the true onset/offset
 LOW_CONF = 0.3                  # aligner score; fixed (not per-clip percentile) on purpose
 LONG_SPAN_BASE_SEC = 0.6        # long_span if duration > BASE + PER_CHAR * len(text)
@@ -41,8 +40,8 @@ def word_coverage(words: List[Word], bridge_sec: float = WORD_BRIDGE_SEC) -> Lis
 
 
 def _split_multiword(entry: Dict) -> List[Dict]:
-    """A transcript entry holding several words (segment-level fallback, e.g. Gemini
-    STT) is spread evenly over its span; the per-word times are interpolated."""
+    """A transcript entry holding several words (segment-level ASR output) is
+    spread evenly over its span; the per-word times are interpolated."""
     tokens = entry["text"].split()
     if len(tokens) <= 1:
         return [entry]

@@ -86,17 +86,6 @@ def test_score_text_normalises_case_and_punctuation():
     assert score_text("Don't stop, ok?", "don't STOP ok")["word_error_rate"] == 0.0
 
 
-def test_rendered_ranges_mirrors_assembly_overlap_clamp():
-    from eval.run_eval import rendered_ranges
-    edl = [{"source_file": "a", "start_sec": 1.0, "end_sec": 5.0},
-           {"source_file": "a", "start_sec": 2.0, "end_sec": 4.0},     # contained -> dropped
-           {"source_file": "a", "start_sec": 4.5, "end_sec": 8.0},     # overlaps -> trimmed to 5.0
-           {"source_file": "a", "start_sec": 7.95, "end_sec": 8.02},   # < 0.1s after trim -> dropped
-           {"source_file": "b", "start_sec": 0.0, "end_sec": 1.0}]
-    assert [(r.source_file, r.start, r.end) for r in rendered_ranges(edl)] == [
-        ("a", 1.0, 5.0), ("a", 5.0, 8.0), ("b", 0.0, 1.0)]
-
-
 def test_optional_never_penalised_and_imperfect_drop_counted():
     g = Gold.model_validate(dict(
         clip_id="c", status="reviewed", sources=[{"file": "a", "path": "a", "sha256": "0"}],

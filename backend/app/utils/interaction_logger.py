@@ -31,37 +31,14 @@ class InteractionLogger:
         except Exception as e:
             self.logger.error(f"Failed to log interaction {action}: {e}")
 
-    def log_pipeline_completion(self, job_id: str, egt_data: Dict[str, Any], edl_data: List[Dict[str, Any]]):
-        """Log the completion of a job, including pretty-printed EGT and EDL outputs."""
+    def log_pipeline_completion(self, job_id: str, segments: List[Dict[str, Any]]):
+        """Log the completion of a job with the rendered timeline's segments."""
         try:
-            # EGT Summary
-            egt_summary = f"\n=== EGT (Editorial Ground Truth) SUMMARY for Job {job_id} ===\n"
-            total_duration = egt_data.get("total_duration_sec", 0.0)
-            segments = egt_data.get("segments", [])
-            egt_summary += f"Total Raw Duration: {total_duration:.2f}s | Segments: {len(segments)}\n"
-            
-            for i, seg in enumerate(segments):
-                egt_summary += (
-                    f"  [{i}] {seg.get('start_sec', 0):.1f}s - {seg.get('end_sec', 0):.1f}s "
-                    f"| Type: {seg.get('segment_type', 'UNKNOWN')} "
-                    f"| Quality: {seg.get('quality_score', 0):.2f} "
-                    f"| Bad Take: {seg.get('is_bad_take', False)}\n"
-                    f"      Transcript: '{seg.get('transcript', '')}'\n"
-                    f"      Tags: {', '.join(seg.get('tags', []))}\n"
-                )
-            
-            # EDL Summary
-            edl_summary = f"\n=== EDL (Edit Decision List) SUMMARY for Job {job_id} ===\n"
-            edl_summary += f"Total Clips: {len(edl_data)}\n"
-            
-            for i, clip in enumerate(edl_data):
-                edl_summary += (
-                    f"  [{i}] {clip.get('start_sec', 0):.1f}s - {clip.get('end_sec', 0):.1f}s "
-                    f"| File: {clip.get('source_file', '')} "
-                    f"| Type: {clip.get('editorial_type', 'KEEP')}\n"
-                )
-                
-            self.logger.info(f"PIPELINE COMPLETED: {job_id}\n{egt_summary}\n{edl_summary}\n{'='*60}\n")
+            summary = f"Total Clips: {len(segments)}\n"
+            for i, clip in enumerate(segments):
+                summary += (f"  [{i}] {clip.get('src_in', 0):.1f}s - {clip.get('src_out', 0):.1f}s "
+                            f"| File: {clip.get('source_file', '')}\n")
+            self.logger.info(f"PIPELINE COMPLETED: {job_id}\n{summary}{'='*60}\n")
         except Exception as e:
             self.logger.error(f"Failed to log pipeline completion for {job_id}: {e}")
 
