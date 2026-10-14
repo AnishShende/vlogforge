@@ -30,8 +30,16 @@ import numpy as np
 
 from app.tasks.word_grid import build_word_grid, check_word_grid, summarize_word_grid, word_coverage
 from app.utils.speech_activity import HOP_SEC, envelope, load_audio
-from eval.draft_gold import _default_job_dir
 from eval.gold import EVAL_SET_DIR, REPO_ROOT, all_spans, load_gold, load_manifest
+
+
+def _default_job_dir(video: str, clip_id: str) -> str:
+    """Reuse the upload job dir when the video lives in <job>/raw/ (keeps mock
+    cache keys stable); otherwise use a scratch work dir under eval-set/."""
+    parent = os.path.dirname(os.path.abspath(video))
+    if os.path.basename(parent) == "raw":
+        return os.path.dirname(parent)
+    return os.path.join(EVAL_SET_DIR, "_work", clip_id)
 
 
 def clip_audio(clip_id: str) -> dict:
@@ -126,7 +134,6 @@ def main():
         print(json.dumps(compare(*a.compare), indent=2))
         return
 
-    settings.enable_word_grid = True
     settings.enable_mock_whisper = not a.fresh
     clips = [c["clip_id"] for c in load_manifest()["clips"] if not a.clip or c["clip_id"] in a.clip]
     grids = {}

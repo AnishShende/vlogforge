@@ -3,7 +3,7 @@ against gold.json. Gold `silent` pieces are the finished vlog's no-speech stretc
 for them both b_roll and silent count as right (reported separately); `usable` is judged on own footage.
 
 Usage (from backend/):
-    PYTHONPATH=. python -m eval.footage_eval [--project nz_travel_w1] [--house-tour JOB_ID]
+    PYTHONPATH=. python -m eval.footage_eval [--project nz_travel_w1] [--job JOB_ID]
 """
 
 import argparse
@@ -71,17 +71,17 @@ def score_project(proj: str) -> Dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--project", action="append")
-    ap.add_argument("--house-tour")
+    ap.add_argument("--job", help="classify the files of a stored job")
     a = ap.parse_args()
     projs = a.project or sorted(p for p in os.listdir(SYNTH_DIR) if os.path.exists(os.path.join(SYNTH_DIR, p, "gold.json")))
     tot = [score_project(p) for p in projs]
     print(f"ALL: {sum(t['right'] for t in tot)}/{sum(t['files'] for t in tot)} files right")
-    if a.house_tour:
+    if a.job:
         from app.utils import artifacts
-        files = artifacts.load_job(a.house_tour, "files")
-        res = classify_files([f["path"] for f in files], os.path.join(SYNTH_DIR, "_house_tour_work"))
+        files = artifacts.load_job(a.job, "files")
+        res = classify_files([f["path"] for f in files], os.path.join(SYNTH_DIR, "_job_work"))
         for name, r in res.items():
-            print(f"house tour {name}: {r['category']} {r['seconds']}")
+            print(f"{name}: {r['category']} {r['seconds']}")
             for s in r["shots"]:
                 print(f"    {s['start']:6.2f}-{s['end']:6.2f} {s['category']:10} speech {s['speech_share']:.0%}")
 

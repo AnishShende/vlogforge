@@ -2,10 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Film, Sparkles, Sliders, Clock, Loader2, Home, LayoutDashboard, Settings, Sun, Moon, Play, Share2, Download, XCircle } from 'lucide-react';
 import UploadPanel from './components/UploadPanel';
 import ProcessingMonitor from './components/ProcessingMonitor';
-import VideoPreview from './components/VideoPreview';
 import TranscriptEditor from './components/TranscriptEditor';
 import PublishPanel from './components/PublishPanel';
-import DownloadPanel from './components/DownloadPanel';
 import * as tus from 'tus-js-client';
 
 import Login from './components/auth/Login';
@@ -103,17 +101,9 @@ export default function App() {
   const [contextText, setContextText] = useState('');
   const [jobId, setJobId] = useState(null);
   const [downloadUrl, setDownloadUrl] = useState(null);
-  // Phase 6: word-grid jobs (stored edit) open the transcript editor; others the legacy timeline
-  const [hasGridEdit, setHasGridEdit] = useState(null);
-  useEffect(() => {
-    if (step !== 3 || !jobId) { setHasGridEdit(null); return; }
-    fetch(`/api/jobs/${jobId}/edit`, { method: 'GET' }).then(r => setHasGridEdit(r.ok)).catch(() => setHasGridEdit(false));
-  }, [step, jobId]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [targetDuration, setTargetDuration] = useState(600);
-  const [vlogGenre, setVlogGenre] = useState('default');
   const [theme, setTheme] = useState('dark');
-  const [qualityThreshold, setQualityThreshold] = useState(0.20); // Conservative default
   const [projectName, setProjectName] = useState('Vlog Preview');
   const [currentProjectId, setCurrentProjectId] = useState(null);
   const [showExportModal, setShowExportModal] = useState(false);
@@ -197,8 +187,6 @@ export default function App() {
     if (project.settings) {
       setContextText(project.settings.context_text || '');
       setTargetDuration(project.settings.target_duration || 600);
-      setVlogGenre(project.settings.vlog_genre || 'default');
-      setQualityThreshold(project.settings.quality_threshold || 0.20);
     }
 
     if (project.video_files && project.video_files.length > 0) {
@@ -245,8 +233,6 @@ export default function App() {
     setJobId(null);
     setDownloadUrl(null);
     setTargetDuration(600);              // seconds; the "10 Mins" default (was 10 s, not an option)
-    setVlogGenre('default');
-    setQualityThreshold(0.20);
   };
 
   const handleSubmit = async () => {
@@ -297,9 +283,7 @@ export default function App() {
       const formData = new FormData();
       formData.append('project_id', currentProjectId);
       formData.append('context_text', contextText);
-      formData.append('vlog_genre', vlogGenre);
       formData.append('target_duration', targetDuration);
-      formData.append('quality_threshold', qualityThreshold);
 
       const response = await fetch('/api/jobs', {
         method: 'POST',
@@ -352,14 +336,6 @@ export default function App() {
     setJobId(null);
     setDownloadUrl(null);
     setTargetDuration(600);              // seconds; the "10 Mins" default (was 10 s, not an option)
-    setVlogGenre('default');
-    setQualityThreshold(0.20);
-  };
-
-  const handleReEdit = () => {
-    setStep(1);
-    setJobId(null);
-    setDownloadUrl(null);
   };
 
   if (currentScreen === 'loading') {
@@ -513,25 +489,7 @@ export default function App() {
                       { value: 300, label: '5 Mins (Standard)' },
                       { value: 600, label: '10 Mins (Extended - Default)' },
                       { value: 900, label: '15 Mins (Documentary)' },
-                      { value: 0, label: 'Auto (30% raw length)' }
-                    ]}
-                  />
-                </div>
-
-                <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                  <label htmlFor="genre-select" style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 500, display: 'flex', alignItems: 'center', gap: '0.3rem', whiteSpace: 'nowrap', width: '120px' }}>
-                    <Sparkles size={12} />
-                    Vlog Genre
-                  </label>
-                  <CustomSelect
-                    value={vlogGenre}
-                    onChange={setVlogGenre}
-                    options={[
-                      { value: 'default', label: 'General / Default Vlog' },
-                      { value: 'gym', label: 'Gym / Fitness Vlog' },
-                      { value: 'travel', label: 'Travel Vlog' },
-                      { value: 'daily', label: 'Daily Vlog / Lifestyle' },
-                      { value: 'makeup', label: 'Makeup / Tutorial' }
+                      { value: 0, label: 'Auto (keep every moment)' }
                     ]}
                   />
                 </div>
@@ -568,38 +526,8 @@ export default function App() {
           {/* Divider */}
           <div className="setup-divider" />
 
-          {/* RIGHT HALF: Additional settings if any */}
+          {/* RIGHT HALF: footage */}
           <div className="setup-panel-right">
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1.25rem' }}>
-              <Sliders size={18} style={{ color: 'var(--secondary)' }} />
-              <h2 style={{ margin: 0, fontSize: '1.4rem', fontFamily: 'Outfit, sans-serif', fontWeight: 700 }}>Quality Calibration</h2>
-            </div>
-            
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.82rem', marginBottom: '1.5rem', lineHeight: 1.45 }}>
-              Set how aggressively the AI drops low-quality takes (stumbles, silence). You can fine-tune this later in the Studio.
-            </p>
-            
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '2rem' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <label htmlFor="quality-slider-setup" style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 500, display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
-                  Filter Threshold
-                </label>
-                <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--secondary)' }}>{qualityThreshold.toFixed(2)}</span>
-              </div>
-              <input 
-                type="range" 
-                id="quality-slider-setup"
-                min="0" max="1" step="0.05"
-                value={qualityThreshold}
-                onChange={(e) => setQualityThreshold(parseFloat(e.target.value))}
-                style={{ width: '100%', accentColor: 'var(--primary)' }}
-              />
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.65rem', color: 'var(--text-disabled)' }}>
-                <span>Keep More (Conservative)</span>
-                <span>Drop More (Aggressive)</span>
-              </div>
-            </div>
-
             <UploadPanel 
               files={files} 
               setFiles={setFiles} 
@@ -623,16 +551,8 @@ export default function App() {
       )}
 
       {/* ═══ STEP 3: PREVIEW / EXPORT ═══ */}
-      {step === 3 && hasGridEdit && (
+      {step === 3 && (
         <TranscriptEditor jobId={jobId} onReset={resetProject} />
-      )}
-      {step === 3 && hasGridEdit === false && (
-        <VideoPreview 
-          jobId={jobId} 
-          downloadUrl={downloadUrl} 
-          onReset={resetProject}
-          onReEdit={handleReEdit}
-        />
       )}
         </main>
       </div>
@@ -690,18 +610,7 @@ export default function App() {
             </button>
             
             <div style={{ padding: '2rem' }}>
-              {hasGridEdit ? (
-                <PublishPanel jobId={jobId} onReset={() => { setShowExportModal(false); resetProject(); }} />
-              ) : (
-              <DownloadPanel 
-                jobId={jobId} 
-                downloadUrl={downloadUrl} 
-                onReset={() => {
-                  setShowExportModal(false);
-                  resetProject();
-                }} 
-              />
-              )}
+              <PublishPanel jobId={jobId} onReset={() => { setShowExportModal(false); resetProject(); }} />
             </div>
           </div>
         </div>

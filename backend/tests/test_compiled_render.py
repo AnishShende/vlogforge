@@ -1,6 +1,6 @@
 """Compiled-timeline render (Archdoc roadmap Phase 2 / S4): A/V length stays equal across many cuts.
 
-Regression for the legacy multi-pass path, whose 75 ms acrossfade per join made audio
+Regression for an earlier multi-pass render, whose 75 ms acrossfade per join made audio
 0.76 s shorter than video over 12 clips. Needs ffmpeg on PATH (synthetic sources, ~10 s).
 """
 import json

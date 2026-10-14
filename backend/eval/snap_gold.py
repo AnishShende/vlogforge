@@ -12,8 +12,8 @@ Also reports UNACCOUNTED speech: detected speech covered by no span
 (e.g. speech the ASR never transcribed). Reported only, never auto-labelled.
 
 Usage (from backend/, ffmpeg on PATH):
-    PYTHONPATH=. python -m eval.snap_gold --clip-id IMG_1614          # dry run
-    PYTHONPATH=. python -m eval.snap_gold --clip-id IMG_1614 --write
+    PYTHONPATH=. python -m eval.snap_gold --clip-id <clip_id>          # dry run
+    PYTHONPATH=. python -m eval.snap_gold --clip-id <clip_id> --write
 """
 
 import argparse

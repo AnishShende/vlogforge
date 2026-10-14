@@ -3,13 +3,10 @@ import { useWebSocket } from '../hooks/useWebSocket';
 import { CheckCircle2, Loader2, AlertCircle, XCircle, StopCircle } from 'lucide-react';
 
 const STAGES = [
-  { key: 'ingesting', label: 'Ingesting & Pre-processing', desc: 'Extracting audio stream and identifying scene transitions.' },
-  { key: 'transcribing', label: 'Transcribing Audio', desc: 'Whisper local model running speech-to-text.' },
-  { key: 'analyzing', label: 'AI Keyframe & Context Analysis', desc: 'Gemini Vision parsing scene keyframes.' },
-  { key: 'classifying', label: 'Segment Classification', desc: 'Labeling scenes with AI.' },
-  { key: 'edl_generating', label: 'Generating EDL', desc: 'Applying target duration and pacing rules.' },
-  { key: 'assembling', label: 'FFmpeg Vlog Assembly', desc: 'Cutting, normalizing, and joining clips.' },
-  { key: 'metadata_generating', label: 'YouTube Metadata', desc: 'Generating title, description, tags, and chapters.' }
+  { key: 'ingesting', label: 'Ingesting', desc: 'Making a light proxy and extracting the audio.' },
+  { key: 'transcribing', label: 'Transcribing Audio', desc: 'Whisper + word alignment: every word with its time.' },
+  { key: 'edl_generating', label: 'Editing the Speech', desc: 'Removing dead air, stutters, retakes and false starts, then planning the story.' },
+  { key: 'assembling', label: 'Rendering', desc: 'Frame-accurate cuts, loudness, and a final check of the render.' }
 ];
 
 export default function ProcessingMonitor({ jobId, onComplete, onFailed, onReset, onCancel }) {
@@ -38,7 +35,7 @@ export default function ProcessingMonitor({ jobId, onComplete, onFailed, onReset
   const { status } = useWebSocket(jobId, handleWebSocketMessage);
 
   const getStageStatus = (stageKey) => {
-    const stageOrder = ['pending', 'ingesting', 'transcribing', 'analyzing', 'classifying', 'edl_generating', 'assembling', 'metadata_generating', 'complete'];
+    const stageOrder = ['pending', 'ingesting', 'transcribing', 'edl_generating', 'assembling', 'complete'];
     const currentIndex = stageOrder.indexOf(currentStage);
     const stageIndex = stageOrder.indexOf(stageKey);
 

@@ -2,7 +2,7 @@
 Local only (eval-set/review_moments.html); nothing is uploaded.
 
 Usage (from backend/):
-    PYTHONPATH=. python -m eval.moments_page --job IMG_1614=<job> --job IMG_0248=<job> ...
+    PYTHONPATH=. python -m eval.moments_page --job <clip_id>=<job> --job <clip_id>=<job> ...
 """
 
 import argparse

@@ -1,8 +1,7 @@
 """Score an edit against gold (Archdoc Phase 0 / S3). Pure functions, no I/O.
 
 Pipeline-agnostic: the input is just the output timeline, i.e. source ranges in
-output order, so the legacy EDL path, the word-timeline path and the future
-Phase 2 compiler are all scored the same way.
+output order, so any planner feeding the compiler is scored the same way.
 
 Two independent views:
   timeline  exact source-range checks against gold keep/exclude spans

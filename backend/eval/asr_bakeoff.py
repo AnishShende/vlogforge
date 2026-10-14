@@ -33,7 +33,6 @@ import time
 from datetime import datetime
 from typing import Dict, List
 
-from app.config import settings
 from app.models import WORD_FLAG_RECOVERED
 from app.tasks.transcribe import _forced_align
 from app.tasks.word_grid import build_word_grid, check_word_grid, summarize_word_grid, word_coverage
@@ -200,7 +199,6 @@ def main():
     ap.add_argument("--clip", action="append")
     ap.add_argument("--repeat", type=int, default=2, help="runs per candidate (determinism)")
     a = ap.parse_args()
-    settings.enable_word_grid = True              # aligner keeps conf + interpolates untimed words
     cands = a.cand or [c for c in sorted(CANDIDATES) if not ({"api", "file"} & set(CANDIDATES[c]))]   # hosted/external: opt-in
     entries = [c for c in load_manifest()["clips"] if not a.clip or c["clip_id"] in a.clip]
     clips = [c["clip_id"] for c in entries]

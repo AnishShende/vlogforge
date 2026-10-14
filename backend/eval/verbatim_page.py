@@ -10,7 +10,7 @@ Optional second verbatim ASR (e.g. CrisperWhisper from the bake-off) shown per a
 heard something different (off by default).
 
 Usage (from backend/):
-    PYTHONPATH=. python -m eval.verbatim_page --job <job_id> [--clip IMG_1614] \
+    PYTHONPATH=. python -m eval.verbatim_page --job <job_id> [--clip <clip_id>] \
         [--alt ../eval-set/_work/asr/F_large.json] [--pause 0.4]
 Writes eval-set/<clip>/verbatim.html with --clip, else artifacts/jobs/<job>/verbatim.html.
 """

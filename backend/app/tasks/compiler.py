@@ -2,8 +2,8 @@
 
 S2 cut-point selection. For each run of kept words:
   1. Find where the activity past the word edge stops: speech (VAD) OR loud frames,
-     followed at most TAIL_SEARCH_SEC. Aligner word ends are early (IMG_1614: speech runs
-     100-180 ms past them) and Silero VAD misses real speech on noisy audio (chai review),
+     followed at most TAIL_SEARCH_SEC. Aligner word ends are early (on the eval clips speech
+     runs 100-180 ms past them) and Silero VAD misses real speech on noisy audio,
      so neither the word edge nor VAD alone protects a word's tail.
   2. The cut window lies in the pause between that activity and the neighbouring word's
      activity, keeping at most MAX_PAUSE_OUT_SEC / MAX_PAUSE_IN_SEC of it.
@@ -16,8 +16,8 @@ S3 pause normalisation (optional, pause_targets): dead air longer than PAUSE_MAX
 words (no words in the gap: silence OR noise) is shortened to the speaker's own median pause by
 splitting the run there. Both cuts lie inside the longest real silence, or else inside the longest
 stretch with no VAD speech (noise allowed; flagged in_noise). Sound VAD calls speech is never cut. Changed 2026-10-06
-after the user's listening review: noisy pauses between sentences (chai kitchen) had been kept whole.
-Values measured on the eval set and approved 2026-10-06 (docs/ARCHDOC_ROADMAP.md, Phase 2).
+after the user's listening review: noisy pauses between sentences (background noise) had been kept whole.
+Values measured on the eval set and approved 2026-10-06.
 """
 
 import logging
@@ -298,7 +298,7 @@ def _dead_air(W, a: int, b: int, env: Envelope) -> Optional[bool]:
     """Dead air (user, 2026-10-06) between consecutive grid words: True = a real silence longer than
     PAUSE_MAX_SEC; False = no real silence, but a stretch longer than PAUSE_MAX_SEC with no VAD speech
     (noise only); None = neither. Any sound VAD calls speech is kept (an earlier whole-gap rule cut
-    speech the grid has no words for on chai)."""
+    speech the grid has no words for on a noisy eval clip)."""
     if W[b].start - W[a].end <= PAUSE_MAX_SEC:
         return None
     if silence_between(env, W[a].end, W[b].start) > PAUSE_MAX_SEC:
