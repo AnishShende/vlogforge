@@ -4,6 +4,12 @@ VlogForge turns raw talking-to-camera footage into a first-cut vlog. Upload your
 
 A **FastAPI** backend runs the pipeline. A **React + Vite** frontend handles upload, progress, the transcript editor and export.
 
+[![Watch the 2-minute demo](media/demo-poster.jpg)](media/demo.mp4)
+
+**[▶ Watch the demo](media/demo.mp4)** (2 min): four raw phone clips of a room tour, recorded out of order, go through the app: upload, processing, the transcript editor, export. VlogForge cuts the stutters, a filler and a false start, shortens long pauses, puts the clips in story order and burns in captions. The finished cut plays in full at the end, with no manual edits.
+
+**Status:** working MVP that runs on your own machine. It is not hosted: every job runs Whisper and WhisperX locally and makes paid Claude calls, so a public instance would need a GPU and per-user billing. B-roll over voice-over is built and measured but switched off for now.
+
 ---
 
 ## How it works
@@ -34,6 +40,25 @@ graph LR
    - AI-written post copy: a YouTube title, description and chapters, or Reels/Shorts captions with hashtags
 
 B-roll over voice-over is built but switched off for the MVP (`ENABLE_BROLL=false`).
+
+---
+
+## Design choices
+
+- **Words are the edit unit.** The LLM never writes timestamps. It returns word IDs to keep or cut, and the compiler turns them into cuts placed in the pauses between words. A model mistake can drop a word, but it cannot cut one in half.
+- **The LLM judges, code guarantees.** Prompts decide what is a stutter or a weaker take. Hard rules in code enforce what must never happen: a line kept twice, a phrase repeated back to back, a render whose audio and video lengths differ.
+- **Small passes, one job each.** Each edit pass reads the edit left by the one before. Word-level stutter and filler cuts use Claude Haiku. Choosing between takes, incomplete lines and the final review use Claude Sonnet.
+- **Keep by default.** Unique speech stays even when it is imperfect. Only redundant speech is cut, so a noisy daily vlog with no retakes loses nothing it needs.
+- **Deterministic render, cached stages.** The same plan always gives the same cut. Stage results are stored by content, so editing words in the transcript re-runs only the render (seconds, not minutes), and an unchanged clip is never transcribed twice.
+
+## How it's measured
+
+`backend/eval/` scores the pipeline against hand-labelled answer keys on a varied set of real clips: talking-head footage full of retakes, a noisy mixed-language daily vlog, and multi-file shoots. The footage and answer keys are private, so the scripts are in the repo but need a local eval set to run.
+
+- **Speech edit** (`edit_passes_eval.py`): cut recall and over-cut in words against a human edit of the same footage. Dropping unique speech must be zero.
+- **Transcript** (`grid_eval.py`, `asr_bakeoff.py`): word-boundary error and speech left uncovered by words. The ASR setup was picked by a bake-off of local and hosted models, which is how missed-speech re-transcription got added.
+- **Render** (`join_audio.py`): level jumps in speech and background at every cut.
+- **B-roll** (`broll_eval.py`, `footage_eval.py`): where cutaways go and which shot is chosen, scored against the editors of finished vlogs.
 
 ---
 
@@ -116,3 +141,7 @@ python -m pytest -q
 - `logs/`: per-job and interaction logs
 
 All four are git-ignored.
+
+## License
+
+[MIT](LICENSE)
