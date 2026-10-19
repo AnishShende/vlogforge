@@ -4,9 +4,9 @@ VlogForge turns raw talking-to-camera footage into a first-cut vlog. Upload your
 
 A **FastAPI** backend runs the pipeline. A **React + Vite** frontend handles upload, progress, the transcript editor and export.
 
-[![Watch the 2-minute demo](media/demo-poster.jpg)](media/demo.mp4)
+https://github.com/user-attachments/assets/f088a944-9b8a-4b3c-a60f-7287c351de9f
 
-**[▶ Watch the demo](media/demo.mp4)** (2 min): four raw phone clips of a room tour, recorded out of order, go through the app: upload, processing, the transcript editor, export. VlogForge cuts the stutters, a filler and a false start, shortens long pauses, puts the clips in story order and burns in captions. The finished cut plays in full at the end, with no manual edits.
+**Demo** (2 min): four raw phone clips of a room tour, recorded out of order, go through the app: upload, processing, the transcript editor, export. VlogForge cuts the stutters, a filler and a false start, shortens long pauses, puts the clips in story order and burns in captions. The finished cut plays in full at the end, with no manual edits.
 
 **Status:** working MVP that runs on your own machine. It is not hosted: every job runs Whisper and WhisperX locally and makes paid Claude calls, so a public instance would need a GPU and per-user billing. B-roll over voice-over is built and measured but switched off for now.
 

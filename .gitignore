@@ -38,7 +38,6 @@ test-videos/
 mocks/
 *.wav
 *.mp4
-!/media/demo.mp4
 *.mkv
 *.mov
 *.avi
